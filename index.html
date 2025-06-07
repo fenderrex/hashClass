@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dynamic Path Planner with Drag</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: sans-serif; text-align: center; margin: 0; padding: 0; }
+    canvas { border: 1px solid #333; display: block; margin: 0 auto; touch-action: none; }
+    button, select, input { margin: 5px; padding: 8px; font-size: 16px; }
+    #legend { font-size: 14px; text-align: left; margin: 10px auto; width: 90%; max-width: 600px; }
+    #legend div { margin: 4px; }
+    .color-box { display: inline-block; width: 16px; height: 16px; margin-right: 6px; vertical-align: middle; }
+    #debug { font-family: monospace; text-align: left; margin: 10px auto; width: 90%; max-width: 600px; background: #f9f9f9; border: 1px solid #ccc; padding: 8px; height: 6em; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h2>Dynamic Path Planner with Drag</h2>
+  <!-- Grid scale input: adjust the number of pixels per grid cell -->
+  <label for="gridSizeInput">Grid Size (px): </label>
+  <input id="gridSizeInput" type="number" min="5" max="100" value="20" style="width:60px;"> <br>
+  <canvas id="canvas" width="800" height="600"></canvas><br>
+  <select id="algorithm">
+    <option value="astar_corridor_earcut">A* + Earcut</option>
+    <option value="astar_corridor_earcut_bezier">A* + Earcut + Bézier</option>
+    <option value="astar_corridor_earcut_bezier_second">A* + Earcut + Bézier + 2nd A*</option>
+    <option value="astar_corridor_dijkstra_smooth">A* + Dijkstra Smooth</option>
+    <option value="combo">Combo Earcut+Subdiv</option>
+    <option value="full_pipeline">A* + Earcut + Bézier + Chaikin + Earcut (Rolling)</option>
+  </select>
+  <label>Chaikin Iterations: <input id="chaikinIter" type="number" min="0" max="10" value="1"></label>
+  <label>Rolling Window Size: <input id="windowSize" type="number" min="1" max="20" value="5"></label>
+  <button id="run">Run</button>
+  <button id="randomize">Randomize Obstacles</button>
+  <div id="legend">
+    <div><span class="color-box" style="background: blue;"></span> A* + Earcut</div>
+    <div><span class="color-box" style="background: purple;"></span> + Bézier</div>
+    <div><span class="color-box" style="background: orange;"></span> + 2nd A*</div>
+    <div><span class="color-box" style="background: cyan;"></span> Chaikin Smoothed</div>
+    <div><span class="color-box" style="background: green;"></span> Combo Earcut+Subdiv</div>
+    <div><span class="color-box" style="background: magenta;"></span> Full Pipeline Rolling Earcut</div>
+  </div>
+  <div id="debug">Debug output will appear here.</div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const debugEl = document.getElementById('debug');
+const gridInput = document.getElementById('gridSizeInput');
+let gridSize = parseInt(gridInput.value, 10);
+let cols = Math.floor(canvas.width / gridSize);
+let rows = Math.floor(canvas.height / gridSize);
+let start = { x: 2, y: 2 };
+let goal = { x: cols - 3, y: rows - 3 };
+let obstacles = [];
+let dragging = null;
+
+// Update cols, rows, start, goal when grid size changes
+gridInput.addEventListener('change', () => {
+  gridSize = parseInt(gridInput.value, 10);
+  cols = Math.floor(canvas.width / gridSize);
+  rows = Math.floor(canvas.height / gridSize);
+  start = { x: 2, y: 2 };
+  goal = { x: cols - 3, y: rows - 3 };
+  randomizeObstacles();
+  runSelectedPath();
+});
+
+function logDebug(msg) {
+  debugEl.textContent += msg + '\n';
+  debugEl.scrollTop = debugEl.scrollHeight;
+}
+function clearDebug() {
+  debugEl.textContent = '';
+}
+
+function randomizeObstacles() {
+  obstacles = [];
+  for (let i = 0; i < 8; i++) {
+    obstacles.push({ cx: Math.floor(Math.random() * cols), cy: Math.floor(Math.random() * rows), r: 4.5 + Math.random() * 2 });
+  }
+  logDebug(`Obstacles: ${obstacles.length}`);
+}
+
+function isBlocked(x, y) {
+  return obstacles.some(o => Math.hypot(o.cx - x, o.cy - y) < o.r + 0.5);
+}
+
+function drawGrid() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#eee';
+  for (let i = 0; i <= cols; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * gridSize, 0);
+    ctx.lineTo(i * gridSize, canvas.height);
+    ctx.stroke();
+  }
+  for (let j = 0; j <= rows; j++) {
+    ctx.beginPath();
+    ctx.moveTo(0, j * gridSize);
+    ctx.lineTo(canvas.width, j * gridSize);
+    ctx.stroke();
+  }
+}
+
+function drawObs() {
+  ctx.fillStyle = 'black';
+  obstacles.forEach(o => {
+    ctx.beginPath();
+    ctx.arc(o.cx * gridSize, o.cy * gridSize, o.r * gridSize, 0, 2 * Math.PI);
+    ctx.fill();
+  });
+}
+
+function drawPath(path, color) {
+  if (!path || path.length < 2) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo((path[0].x + 0.5) * gridSize, (path[0].y + 0.5) * gridSize);
+  path.forEach(p => ctx.lineTo((p.x + 0.5) * gridSize, (p.y + 0.5) * gridSize));
+  ctx.stroke();
+  ctx.fillStyle = color;
+  path.forEach(p => {
+    ctx.beginPath();
+    ctx.arc((p.x + 0.5) * gridSize, (p.y + 0.5) * gridSize, 3, 0, 2 * Math.PI);
+    ctx.fill();
+  });
+}
+
+function drawPoints() {
+  ctx.fillStyle = 'red';
+  ctx.beginPath();
+  ctx.arc((start.x + 0.5) * gridSize, (start.y + 0.5) * gridSize, gridSize / 2, 0, 2 * Math.PI);
+  ctx.fill();
+  ctx.fillStyle = 'lime';
+  ctx.beginPath();
+  ctx.arc((goal.x + 0.5) * gridSize, (goal.y + 0.5) * gridSize, gridSize / 2, 0, 2 * Math.PI);
+  ctx.fill();
+}
+
+function getCellFromMouse(e) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: Math.floor((e.clientX - rect.left) / gridSize), y: Math.floor((e.clientY - rect.top) / gridSize) };
+}
+
+canvas.addEventListener('mousedown', e => {
+  const cell = getCellFromMouse(e);
+  if (Math.hypot(cell.x - start.x, cell.y - start.y) < 1) dragging = 'start';
+  else if (Math.hypot(cell.x - goal.x, cell.y - goal.y) < 1) dragging = 'goal';
+});
+canvas.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const cell = getCellFromMouse(e);
+  if (cell.x >= 0 && cell.x < cols && cell.y >= 0 && cell.y < rows) {
+    if (dragging === 'start') start = { x: cell.x, y: cell.y };
+    else if (dragging === 'goal') goal = { x: cell.x, y: cell.y };
+    runSelectedPath();
+  }
+});
+canvas.addEventListener('mouseup', () => { dragging = null; });
+canvas.addEventListener('mouseleave', () => { dragging = null; });
+
+function bfsBetween(s, g) {
+  const q = [s];
+  const visited = new Set([`${s.x},${s.y}`]);
+  const from = {};
+  while (q.length) {
+    const c = q.shift();
+    if (c.x === g.x && c.y === g.y) {
+      const path = [];
+      let n = c;
+      while (n) { path.push(n); n = from[`${n.x},${n.y}`]; }
+      logDebug(`BFS visited: ${visited.size}`);
+      return path.reverse();
+    }
+    [[1,0],[0,1],[-1,0],[0,-1]].forEach(([dx, dy]) => {
+      const nx = c.x + dx, ny = c.y + dy, key = `${nx},${ny}`;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows || isBlocked(nx, ny) || visited.has(key)) return;
+      visited.add(key);
+      from[key] = c;
+      q.push({ x: nx, y: ny });
+    });
+  }
+  logDebug(`BFS no path, visited: ${visited.size}`);
+  return null;
+}
+
+function hasLOS(a, b) {
+  let x0 = a.x, y0 = a.y;
+  const x1 = b.x, y1 = b.y;
+  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  while (x0 !== x1 || y0 !== y1) {
+    if (isBlocked(x0, y0)) return false;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+  return !isBlocked(x1, y1);
+}
+
+function earcutRolling(path, w) {
+  const out = [path[0]]; let i = 0;
+  while (i < path.length - 1) {
+    let end = Math.min(i + w, path.length - 1);
+    let j = end;
+    while (j > i + 1 && !hasLOS(path[i], path[j])) j--;
+    out.push(path[j]);
+    i = j;
+  }
+  logDebug(`Earcut passes: ${out.length}`);
+  return out;
+}
+
+function subdiv(path, segs = 2) {
+  const out = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    out.push(path[i]);
+    for (let s = 1; s < segs; s++) {
+      const t = s / segs;
+      out.push({ x: (1 - t) * path[i].x + t * path[i+1].x, y: (1 - t) * path[i].y + t * path[i+1].y });
+    }
+  }
+  out.push(path[path.length - 1]);
+  return out;
+}
+
+function bezierSmooth(path, step) {
+  if (path.length < 3) return path;
+  const sm = [path[0]];
+  const delta = step || 1 / (Math.max(1, path.length - 1));
+  for (let i = 1; i < path.length - 1; i++) {
+    const p0 = path[i-1], p1 = path[i], p2 = path[i+1];
+    for (let t = 0; t <= 1; t += delta) {
+      const x = (1 - t)*(1 - t)*p0.x + 2*(1 - t)*t*p1.x + t*t*p2.x;
+      const y = (1 - t)*(1 - t)*p0.y + 2*(1 - t)*t*p1.y + t*t*p2.y;
+      if (!isBlocked(x, y)) sm.push({ x, y });
+    }
+  }
+  sm.push(path[path.length - 1]);
+  return sm;
+}
+
+function chaikin(path) {
+  const pts = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    const p0 = path[i], p1 = path[i+1];
+    pts.push({ x: 0.75*p0.x + 0.25*p1.x, y: 0.75*p0.y + 0.25*p1.y });
+    pts.push({ x: 0.25*p0.x + 0.75*p1.x, y: 0.25*p0.y + 0.75*p1.y });
+  }
+  return pts;
+}
+
+function chaikinIter(path, it) {
+  let cur = path;
+  for (let k = 0; k < it; k++) cur = chaikin(cur);
+  logDebug(`Chaikin iterations: ${it}`);
+  return cur;
+}
+
+function runSelectedPath() {
+  clearDebug(); logDebug(`Run: ${new Date().toLocaleTimeString()}`);
+  drawGrid(); drawObs(); drawPoints();
+  const raw = bfsBetween(start, goal);
+  if (!raw) return;
+  logDebug(`Raw length: ${raw.length}`);
+  const wSz = parseInt(document.getElementById('windowSize').value, 10);
+  const ear = subdiv(earcutRolling(raw, wSz), 1);
+  logDebug(`After earcut: ${ear.length}`);
+  const bez = bezierSmooth(ear, 1 / Math.max(1, wSz));
+  logDebug(`After bezier: ${bez.length}`);
+  const cIt = parseInt(document.getElementById('chaikinIter').value, 10);
+  const alg = document.getElementById('algorithm').value;
+  let res;
+  switch (alg) {
+    case 'astar_corridor_earcut': res = ear; break;
+    case 'astar_corridor_earcut_bezier': res = bez; break;
+    case 'astar_corridor_earcut_bezier_second':
+      res = [];
+      for (let i = 0; i < bez.length - 1; i++) {
+        const seg = bfsBetween(bez[i], bez[i+1]);
+        if (seg) { if (res.length) res.pop(); res = res.concat(seg); }
+      }
+      logDebug(`2nd A* length: ${res.length}`);
+      break;
+    case 'astar_corridor_dijkstra_smooth':
+      res = bfsBetween(start, goal);
+      if (res) {
+        logDebug(`Dijkstra raw: ${res.length}`);
+        res = subdiv(earcutRolling(res, wSz), 2);
+        logDebug(`Dijkstra earcut: ${res.length}`);
+      }
+      break;
+    case 'combo':
+      res = subdiv(ear, 3);
+      logDebug(`Combo length: ${res.length}`);
+      break;
+    case 'full_pipeline':
+      res = ear;
+      if (cIt > 0) {
+        res = chaikinIter(res, cIt);
+        logDebug(`After chaikin: ${res.length}`);
+      }
+      res = earcutRolling(res, wSz);
+      logDebug(`Final earcut: ${res.length}`);
+      break;
+  }
+  if (cIt > 0 && alg !== 'full_pipeline') {
+    res = chaikinIter(res, cIt);
+    logDebug(`Applied Chaikin to ${alg}: ${res.length}`);
+  }
+  const color = alg === 'combo' ? 'green' : alg === 'full_pipeline' ? 'magenta' : alg.includes('bezier') ? 'purple' : 'blue';
+  drawPath(res, color);
+}
+
+// Attach buttons and init
+document.getElementById('run').onclick = runSelectedPath;
+document.getElementById('randomize').onclick = () => { randomizeObstacles(); runSelectedPath(); };
+
+// Initial setup
+randomizeObstacles();
+runSelectedPath();
+</script>
+</body>
+</html>
