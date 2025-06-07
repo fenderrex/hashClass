@@ -5,21 +5,29 @@
   <title>Dynamic Path Planner with Drag</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    body { font-family: sans-serif; text-align: center; margin: 0; padding: 0; }
+    body   { font-family: sans-serif; text-align: center; margin: 0; padding: 0; }
     canvas { border: 1px solid #333; display: block; margin: 0 auto; touch-action: none; }
     button, select, input { margin: 5px; padding: 8px; font-size: 16px; }
     #legend { font-size: 14px; text-align: left; margin: 10px auto; width: 90%; max-width: 600px; }
     #legend div { margin: 4px; }
     .color-box { display: inline-block; width: 16px; height: 16px; margin-right: 6px; vertical-align: middle; }
-    #debug { font-family: monospace; text-align: left; margin: 10px auto; width: 90%; max-width: 600px; background: #f9f9f9; border: 1px solid #ccc; padding: 8px; height: 6em; overflow-y: auto; }
+    #debug { font-family: monospace; text-align: left; margin: 10px auto; width: 90%; max-width: 600px;
+             background: #f9f9f9; border: 1px solid #ccc; padding: 8px; height: 6em; overflow-y: auto; }
   </style>
 </head>
 <body>
   <h2>Dynamic Path Planner with Drag</h2>
-  <!-- Grid scale input: adjust the number of pixels per grid cell -->
+
+  <!-- Map upload -->
+  <label for="mapUpload">Upload B/W Map:&nbsp;</label>
+  <input id="mapUpload" type="file" accept="image/*"><br>
+
+  <!-- Grid size -->
   <label for="gridSizeInput">Grid Size (px): </label>
-  <input id="gridSizeInput" type="number" min="5" max="100" value="20" style="width:60px;"> <br>
+  <input id="gridSizeInput" type="number" min="5" max="100" value="20" style="width:60px;"><br>
+
   <canvas id="canvas" width="800" height="600"></canvas><br>
+
   <select id="algorithm">
     <option value="astar_corridor_earcut">A* + Earcut</option>
     <option value="astar_corridor_earcut_bezier">A* + Earcut + Bézier</option>
@@ -32,7 +40,9 @@
   <label>Rolling Window Size: <input id="windowSize" type="number" min="1" max="20" value="5"></label>
   <button id="run">Run</button>
   <button id="randomize">Randomize Obstacles</button>
+
   <div id="legend">
+    <div><span class="color-box" style="background: gold;"></span> Direct Bresenham</div>
     <div><span class="color-box" style="background: blue;"></span> A* + Earcut</div>
     <div><span class="color-box" style="background: purple;"></span> + Bézier</div>
     <div><span class="color-box" style="background: orange;"></span> + 2nd A*</div>
@@ -40,287 +50,299 @@
     <div><span class="color-box" style="background: green;"></span> Combo Earcut+Subdiv</div>
     <div><span class="color-box" style="background: magenta;"></span> Full Pipeline Rolling Earcut</div>
   </div>
+
   <div id="debug">Debug output will appear here.</div>
+
 <script>
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const debugEl = document.getElementById('debug');
-const gridInput = document.getElementById('gridSizeInput');
-let gridSize = parseInt(gridInput.value, 10);
+/* ───────────── canvas + globals ───────────── */
+const canvas   = document.getElementById('canvas');
+const ctx      = canvas.getContext('2d');
+const debugEl  = document.getElementById('debug');
+const gridInput= document.getElementById('gridSizeInput');
+const mapUpload= document.getElementById('mapUpload');
+
+let gridSize = parseInt(gridInput.value,10);
 let cols = Math.floor(canvas.width / gridSize);
-let rows = Math.floor(canvas.height / gridSize);
-let start = { x: 2, y: 2 };
-let goal = { x: cols - 3, y: rows - 3 };
-let obstacles = [];
+let rows = Math.floor(canvas.height/ gridSize);
+
+let start = { x: 2,      y: 2 };
+let goal  = { x: cols-3, y: rows-3 };
+
+const obstacles   = [];         // fallback circles
+const blockedSet  = new Set();  // per-cell blocks from image
 let dragging = null;
 
-// Update cols, rows, start, goal when grid size changes
-gridInput.addEventListener('change', () => {
-  gridSize = parseInt(gridInput.value, 10);
+/* ───────────── debug helpers ───────────── */
+const logDebug  = m => { debugEl.textContent += m + '\n'; debugEl.scrollTop = debugEl.scrollHeight; };
+const clearDebug= () => { debugEl.textContent = ''; };
+
+/* ───────────── resize / grid change ───────────── */
+gridInput.addEventListener('change', ()=>{
+  gridSize = parseInt(gridInput.value,10);
   cols = Math.floor(canvas.width / gridSize);
-  rows = Math.floor(canvas.height / gridSize);
-  start = { x: 2, y: 2 };
-  goal = { x: cols - 3, y: rows - 3 };
-  randomizeObstacles();
-  runSelectedPath();
+  rows = Math.floor(canvas.height/ gridSize);
+  start = { x: 2,      y: 2 };
+  goal  = { x: cols-3, y: rows-3 };
+  obstacles.length = 0; blockedSet.clear();
+  if (mapUpload.files.length) handleImageUpload(); else { randomizeObstacles(); runSelectedPath(); }
 });
 
-function logDebug(msg) {
-  debugEl.textContent += msg + '\n';
-  debugEl.scrollTop = debugEl.scrollHeight;
-}
-function clearDebug() {
-  debugEl.textContent = '';
+/* ───────────── image upload ───────────── */
+mapUpload.addEventListener('change', handleImageUpload);
+
+function handleImageUpload(){
+  const file = mapUpload.files[0]; if(!file) return;
+  const img = new Image();
+  img.onload = ()=>{
+    const off = document.createElement('canvas');
+    off.width = cols; off.height = rows;
+    const octx = off.getContext('2d');
+    octx.drawImage(img,0,0,cols,rows);
+    const data = octx.getImageData(0,0,cols,rows).data;
+    blockedSet.clear();
+    for(let y=0;y<rows;y++){
+      for(let x=0;x<cols;x++){
+        const i=(y*cols+x)*4;
+        const lum = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+        if(lum<128) blockedSet.add(`${x},${y}`);
+      }
+    }
+    logDebug(`Map loaded – blocked cells: ${blockedSet.size}`);
+    runSelectedPath();
+  };
+  const rdr=new FileReader();
+  rdr.onload=e=>img.src=e.target.result;
+  rdr.readAsDataURL(file);
 }
 
-function randomizeObstacles() {
-  obstacles = [];
-  for (let i = 0; i < 8; i++) {
-    obstacles.push({ cx: Math.floor(Math.random() * cols), cy: Math.floor(Math.random() * rows), r: 4.5 + Math.random() * 2 });
+/* ───────────── obstacle fallback ───────────── */
+function randomizeObstacles(){
+  blockedSet.clear(); obstacles.length=0;
+  for(let i=0;i<8;i++){
+    obstacles.push({ cx:Math.floor(Math.random()*cols),
+                     cy:Math.floor(Math.random()*rows),
+                     r:4.5+Math.random()*2 });
   }
   logDebug(`Obstacles: ${obstacles.length}`);
 }
 
-function isBlocked(x, y) {
-  return obstacles.some(o => Math.hypot(o.cx - x, o.cy - y) < o.r + 0.5);
+/* ───────────── collision test ───────────── */
+function isBlocked(x,y){
+  const xi=Math.floor(x), yi=Math.floor(y);
+  if(xi<0||yi<0||xi>=cols||yi>=rows) return true;
+  if(blockedSet.size) return blockedSet.has(`${xi},${yi}`);
+  return obstacles.some(o=>Math.hypot(o.cx-xi,o.cy-yi)<o.r+0.5);
 }
 
-function drawGrid() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = '#eee';
-  for (let i = 0; i <= cols; i++) {
-    ctx.beginPath();
-    ctx.moveTo(i * gridSize, 0);
-    ctx.lineTo(i * gridSize, canvas.height);
-    ctx.stroke();
+/* ───────────── drawing helpers ───────────── */
+function drawGrid(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle='#eee';
+  for(let i=0;i<=cols;i++){ ctx.beginPath(); ctx.moveTo(i*gridSize,0); ctx.lineTo(i*gridSize,canvas.height); ctx.stroke();}
+  for(let j=0;j<=rows;j++){ ctx.beginPath(); ctx.moveTo(0,j*gridSize); ctx.lineTo(canvas.width,j*gridSize);  ctx.stroke();}
+}
+function drawObs(){
+  ctx.fillStyle='black';
+  if(blockedSet.size){
+    blockedSet.forEach(k=>{ const [x,y]=k.split(','); ctx.fillRect(x*gridSize,y*gridSize,gridSize,gridSize); });
+  }else{
+    obstacles.forEach(o=>{ ctx.beginPath(); ctx.arc(o.cx*gridSize,o.cy*gridSize,o.r*gridSize,0,2*Math.PI); ctx.fill();});
   }
-  for (let j = 0; j <= rows; j++) {
-    ctx.beginPath();
-    ctx.moveTo(0, j * gridSize);
-    ctx.lineTo(canvas.width, j * gridSize);
-    ctx.stroke();
-  }
 }
-
-function drawObs() {
-  ctx.fillStyle = 'black';
-  obstacles.forEach(o => {
-    ctx.beginPath();
-    ctx.arc(o.cx * gridSize, o.cy * gridSize, o.r * gridSize, 0, 2 * Math.PI);
-    ctx.fill();
-  });
+function drawPoints(){
+  ctx.fillStyle='red';  ctx.beginPath(); ctx.arc((start.x+0.5)*gridSize,(start.y+0.5)*gridSize,gridSize/2,0,2*Math.PI); ctx.fill();
+  ctx.fillStyle='lime'; ctx.beginPath(); ctx.arc((goal.x +0.5)*gridSize,(goal.y +0.5)*gridSize,gridSize/2,0,2*Math.PI); ctx.fill();
 }
-
-function drawPath(path, color) {
-  if (!path || path.length < 2) return;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo((path[0].x + 0.5) * gridSize, (path[0].y + 0.5) * gridSize);
-  path.forEach(p => ctx.lineTo((p.x + 0.5) * gridSize, (p.y + 0.5) * gridSize));
+function drawPath(path,color){
+  if(!path||path.length<2) return;
+  ctx.strokeStyle=color; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo((path[0].x+0.5)*gridSize,(path[0].y+0.5)*gridSize);
+  path.forEach(p=>ctx.lineTo((p.x+0.5)*gridSize,(p.y+0.5)*gridSize));
   ctx.stroke();
-  ctx.fillStyle = color;
-  path.forEach(p => {
-    ctx.beginPath();
-    ctx.arc((p.x + 0.5) * gridSize, (p.y + 0.5) * gridSize, 3, 0, 2 * Math.PI);
-    ctx.fill();
-  });
+  ctx.fillStyle=color;
+  path.forEach(p=>{ ctx.beginPath(); ctx.arc((p.x+0.5)*gridSize,(p.y+0.5)*gridSize,3,0,2*Math.PI); ctx.fill();});
 }
 
-function drawPoints() {
-  ctx.fillStyle = 'red';
-  ctx.beginPath();
-  ctx.arc((start.x + 0.5) * gridSize, (start.y + 0.5) * gridSize, gridSize / 2, 0, 2 * Math.PI);
-  ctx.fill();
-  ctx.fillStyle = 'lime';
-  ctx.beginPath();
-  ctx.arc((goal.x + 0.5) * gridSize, (goal.y + 0.5) * gridSize, gridSize / 2, 0, 2 * Math.PI);
-  ctx.fill();
+/* ───────────── mouse drag start/goal ───────────── */
+function getCellFromMouse(e){
+  const r=canvas.getBoundingClientRect();
+  return { x:Math.floor((e.clientX-r.left)/gridSize),
+           y:Math.floor((e.clientY-r.top )/gridSize)};
 }
-
-function getCellFromMouse(e) {
-  const rect = canvas.getBoundingClientRect();
-  return { x: Math.floor((e.clientX - rect.left) / gridSize), y: Math.floor((e.clientY - rect.top) / gridSize) };
-}
-
-canvas.addEventListener('mousedown', e => {
-  const cell = getCellFromMouse(e);
-  if (Math.hypot(cell.x - start.x, cell.y - start.y) < 1) dragging = 'start';
-  else if (Math.hypot(cell.x - goal.x, cell.y - goal.y) < 1) dragging = 'goal';
+canvas.addEventListener('mousedown',e=>{
+  const c=getCellFromMouse(e);
+  if(Math.hypot(c.x-start.x,c.y-start.y)<1) dragging='start';
+  else if(Math.hypot(c.x-goal.x,c.y-goal.y)<1) dragging='goal';
 });
-canvas.addEventListener('mousemove', e => {
-  if (!dragging) return;
-  const cell = getCellFromMouse(e);
-  if (cell.x >= 0 && cell.x < cols && cell.y >= 0 && cell.y < rows) {
-    if (dragging === 'start') start = { x: cell.x, y: cell.y };
-    else if (dragging === 'goal') goal = { x: cell.x, y: cell.y };
+canvas.addEventListener('mousemove',e=>{
+  if(!dragging) return;
+  const c=getCellFromMouse(e);
+  if(c.x>=0&&c.x<cols&&c.y>=0&&c.y<rows){
+    if(dragging==='start') start=c; else goal=c;
     runSelectedPath();
   }
 });
-canvas.addEventListener('mouseup', () => { dragging = null; });
-canvas.addEventListener('mouseleave', () => { dragging = null; });
+canvas.addEventListener('mouseup',()=>dragging=null);
+canvas.addEventListener('mouseleave',()=>dragging=null);
 
-function bfsBetween(s, g) {
-  const q = [s];
-  const visited = new Set([`${s.x},${s.y}`]);
-  const from = {};
-  while (q.length) {
-    const c = q.shift();
-    if (c.x === g.x && c.y === g.y) {
-      const path = [];
-      let n = c;
-      while (n) { path.push(n); n = from[`${n.x},${n.y}`]; }
-      logDebug(`BFS visited: ${visited.size}`);
-      return path.reverse();
-    }
-    [[1,0],[0,1],[-1,0],[0,-1]].forEach(([dx, dy]) => {
-      const nx = c.x + dx, ny = c.y + dy, key = `${nx},${ny}`;
-      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows || isBlocked(nx, ny) || visited.has(key)) return;
-      visited.add(key);
-      from[key] = c;
-      q.push({ x: nx, y: ny });
-    });
-  }
-  logDebug(`BFS no path, visited: ${visited.size}`);
-  return null;
-}
-
-function hasLOS(a, b) {
-  let x0 = a.x, y0 = a.y;
-  const x1 = b.x, y1 = b.y;
-  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
-  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
-  let err = dx - dy;
-  while (x0 !== x1 || y0 !== y1) {
-    if (isBlocked(x0, y0)) return false;
-    const e2 = 2 * err;
-    if (e2 > -dy) { err -= dy; x0 += sx; }
-    if (e2 < dx) { err += dx; y0 += sy; }
-  }
-  return !isBlocked(x1, y1);
-}
-
-function earcutRolling(path, w) {
-  const out = [path[0]]; let i = 0;
-  while (i < path.length - 1) {
-    let end = Math.min(i + w, path.length - 1);
-    let j = end;
-    while (j > i + 1 && !hasLOS(path[i], path[j])) j--;
-    out.push(path[j]);
-    i = j;
-  }
-  logDebug(`Earcut passes: ${out.length}`);
-  return out;
-}
-
-function subdiv(path, segs = 2) {
-  const out = [];
-  for (let i = 0; i < path.length - 1; i++) {
-    out.push(path[i]);
-    for (let s = 1; s < segs; s++) {
-      const t = s / segs;
-      out.push({ x: (1 - t) * path[i].x + t * path[i+1].x, y: (1 - t) * path[i].y + t * path[i+1].y });
-    }
-  }
-  out.push(path[path.length - 1]);
-  return out;
-}
-
-function bezierSmooth(path, step) {
-  if (path.length < 3) return path;
-  const sm = [path[0]];
-  const delta = step || 1 / (Math.max(1, path.length - 1));
-  for (let i = 1; i < path.length - 1; i++) {
-    const p0 = path[i-1], p1 = path[i], p2 = path[i+1];
-    for (let t = 0; t <= 1; t += delta) {
-      const x = (1 - t)*(1 - t)*p0.x + 2*(1 - t)*t*p1.x + t*t*p2.x;
-      const y = (1 - t)*(1 - t)*p0.y + 2*(1 - t)*t*p1.y + t*t*p2.y;
-      if (!isBlocked(x, y)) sm.push({ x, y });
-    }
-  }
-  sm.push(path[path.length - 1]);
-  return sm;
-}
-
-function chaikin(path) {
-  const pts = [];
-  for (let i = 0; i < path.length - 1; i++) {
-    const p0 = path[i], p1 = path[i+1];
-    pts.push({ x: 0.75*p0.x + 0.25*p1.x, y: 0.75*p0.y + 0.25*p1.y });
-    pts.push({ x: 0.25*p0.x + 0.75*p1.x, y: 0.25*p0.y + 0.75*p1.y });
+/* ───────────── Bresenham helper ───────────── */
+function bresenhamCells(a,b){
+  const pts=[]; let x0=a.x,y0=a.y; const x1=b.x,y1=b.y;
+  const dx=Math.abs(x1-x0), dy=Math.abs(y1-y0);
+  const sx=x0<x1?1:-1, sy=y0<y1?1:-1; let err=dx-dy;
+  while(true){
+    pts.push({x:x0,y:y0});
+    if(x0===x1 && y0===y1) break;
+    const e2=2*err;
+    if(e2>-dy){ err-=dy; x0+=sx; }
+    if(e2< dx){ err+=dx; y0+=sy; }
   }
   return pts;
 }
 
-function chaikinIter(path, it) {
-  let cur = path;
-  for (let k = 0; k < it; k++) cur = chaikin(cur);
-  logDebug(`Chaikin iterations: ${it}`);
-  return cur;
+/* ───────────── A* with Bresenham bias ───────────── */
+function astarBetween(s,g,lineSet){
+  const open=[];                // min-heap substitute (array OK for small maps)
+  const gScore=new Map([[`${s.x},${s.y}`,0]]);
+  const fScore=new Map();
+  const cameFrom={};
+  const hash=n=>`${n.x},${n.y}`;
+  const heuristic=(n)=>Math.hypot(g.x-n.x, g.y-n.y);  // Euclidean
+
+  fScore.set(hash(s), heuristic(s));
+  open.push({node:s, f:fScore.get(hash(s))});
+
+  while(open.length){
+    // get node with lowest f (array search – fine for < few k nodes)
+    let idx=0; open.forEach((e,i)=>{ if(e.f<open[idx].f) idx=i; });
+    const current=open.splice(idx,1)[0].node;
+    if(current.x===g.x && current.y===g.y){
+      const path=[]; let n=current;
+      while(n){ path.push(n); n=cameFrom[hash(n)]; }
+      return path.reverse();
+    }
+
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dx,dy])=>{
+      const nx=current.x+dx, ny=current.y+dy;
+      if(nx<0||ny<0||nx>=cols||ny>=rows||isBlocked(nx,ny)) return;
+      const nh=hash({x:nx,y:ny});
+
+      /* ----- gCost: cheaper if the step stays on the Bresenham line ----- */
+      const stepCost = lineSet.has(nh) ? 0.5 : 1;   // <-- line bias
+      const tentative = gScore.get(hash(current)) + stepCost;
+
+      if(tentative < (gScore.get(nh) ?? Infinity)){
+        cameFrom[nh] = current;
+        gScore.set(nh, tentative);
+
+        /* ----- hCost: add small penalty for being off-line (shapes f-landscape) */
+        const offLinePenalty = lineSet.has(nh) ? 0 : 0.2;
+        const f = tentative + heuristic({x:nx,y:ny}) + offLinePenalty;
+        fScore.set(nh, f);
+
+        if(!open.some(o=>o.node.x===nx&&o.node.y===ny)) open.push({node:{x:nx,y:ny},f});
+      }
+    });
+  }
+  return null;   // no path
 }
 
-function runSelectedPath() {
+/* ───────────── line-of-sight (for Ear-cut) ───────────── */
+function hasLOS(a,b){
+  let x0=a.x,y0=a.y; const x1=b.x,y1=b.y;
+  const dx=Math.abs(x1-x0), dy=Math.abs(y1-y0);
+  const sx=x0<x1?1:-1, sy=y0<y1?1:-1; let err=dx-dy;
+  while(x0!==x1||y0!==y1){
+    if(isBlocked(x0,y0)) return false;
+    const e2=2*err; if(e2>-dy){err-=dy;x0+=sx;} if(e2<dx){err+=dx;y0+=sy;}
+  }
+  return !isBlocked(x1,y1);
+}
+
+/* ───────────── path post-processing helpers (earcut, etc.) ───────────── */
+function earcutRolling(path,w){
+  const out=[path[0]]; let i=0;
+  while(i<path.length-1){
+    let end=Math.min(i+w, path.length-1), j=end;
+    while(j>i+1 && !hasLOS(path[i],path[j])) j--;
+    out.push(path[j]); i=j;
+  }
+  logDebug(`Earcut passes: ${out.length}`); return out;
+}
+const subdiv=(p,s=2)=>p.flatMap((pt,i)=>i<p.length-1?[...Array(s).keys()].map(k=>({
+  x:pt.x+(p[i+1].x-pt.x)*(k/s), y:pt.y+(p[i+1].y-pt.y)*(k/s)})):pt);
+function bezierSmooth(path,step){
+  if(path.length<3) return path;
+  const out=[path[0]], d=step||1/Math.max(1,path.length-1);
+  for(let i=1;i<path.length-1;i++){
+    const p0=path[i-1],p1=path[i],p2=path[i+1];
+    for(let t=0;t<=1;t+=d){
+      const x=(1-t)*(1-t)*p0.x+2*(1-t)*t*p1.x+t*t*p2.x;
+      const y=(1-t)*(1-t)*p0.y+2*(1-t)*t*p1.y+t*t*p2.y;
+      if(!isBlocked(x,y)) out.push({x,y});
+    }
+  } out.push(path[path.length-1]); return out;
+}
+const chaikin=p=>p.flatMap((pt,i)=>i<p.length-1?[
+  {x:0.75*pt.x+0.25*p[i+1].x,y:0.75*pt.y+0.25*p[i+1].y},
+  {x:0.25*pt.x+0.75*p[i+1].x,y:0.25*pt.y+0.75*p[i+1].y}]:pt);
+const chaikinIter=(p,it)=>{ let r=p; for(let k=0;k<it;k++) r=chaikin(r); return r;};
+
+/* ───────────── main run ───────────── */
+function runSelectedPath(){
   clearDebug(); logDebug(`Run: ${new Date().toLocaleTimeString()}`);
   drawGrid(); drawObs(); drawPoints();
-  const raw = bfsBetween(start, goal);
-  if (!raw) return;
+
+  /* ── Bresenham straight-shot check ── */
+  const lineCells=bresenhamCells(start,goal);
+  if(lineCells.every(c=>!isBlocked(c.x,c.y))){
+    logDebug(`Direct Bresenham (len ${lineCells.length})`);
+    drawPath(lineCells,'gold'); return;
+  }
+
+  /* precompute a Set for quick “on-line?” check */
+  const lineSet = new Set(lineCells.map(c=>`${c.x},${c.y}`));
+
+  /* base path with A* (Bresenham-biased) */
+  const raw = astarBetween(start,goal,lineSet);
+  if(!raw){ logDebug('No path'); return; }
   logDebug(`Raw length: ${raw.length}`);
-  const wSz = parseInt(document.getElementById('windowSize').value, 10);
-  const ear = subdiv(earcutRolling(raw, wSz), 1);
-  logDebug(`After earcut: ${ear.length}`);
-  const bez = bezierSmooth(ear, 1 / Math.max(1, wSz));
-  logDebug(`After bezier: ${bez.length}`);
-  const cIt = parseInt(document.getElementById('chaikinIter').value, 10);
-  const alg = document.getElementById('algorithm').value;
-  let res;
-  switch (alg) {
-    case 'astar_corridor_earcut': res = ear; break;
-    case 'astar_corridor_earcut_bezier': res = bez; break;
+
+  const wSz=parseInt(document.getElementById('windowSize').value,10);
+  const ear=subdiv( earcutRolling(raw,wSz), 1 );  logDebug(`After earcut: ${ear.length}`);
+  const bez=bezierSmooth(ear,1/Math.max(1,wSz));  logDebug(`After bezier: ${bez.length}`);
+
+  const cIt=parseInt(document.getElementById('chaikinIter').value,10);
+  const alg=document.getElementById('algorithm').value; let res;
+  switch(alg){
+    case 'astar_corridor_earcut': res=ear; break;
+    case 'astar_corridor_earcut_bezier': res=bez; break;
     case 'astar_corridor_earcut_bezier_second':
-      res = [];
-      for (let i = 0; i < bez.length - 1; i++) {
-        const seg = bfsBetween(bez[i], bez[i+1]);
-        if (seg) { if (res.length) res.pop(); res = res.concat(seg); }
-      }
-      logDebug(`2nd A* length: ${res.length}`);
-      break;
+      res=[]; for(let i=0;i<bez.length-1;i++){
+        const seg=astarBetween(bez[i],bez[i+1],lineSet);
+        if(seg){ if(res.length) res.pop(); res=res.concat(seg); }
+      } logDebug(`2nd A* length: ${res.length}`); break;
     case 'astar_corridor_dijkstra_smooth':
-      res = bfsBetween(start, goal);
-      if (res) {
-        logDebug(`Dijkstra raw: ${res.length}`);
-        res = subdiv(earcutRolling(res, wSz), 2);
-        logDebug(`Dijkstra earcut: ${res.length}`);
-      }
+      res=astarBetween(start,goal,new Set());  // no line bias
+      if(res){ logDebug(`Dijkstra raw: ${res.length}`);
+               res=subdiv( earcutRolling(res,wSz),2); logDebug(`Dijkstra earcut: ${res.length}`);} 
       break;
-    case 'combo':
-      res = subdiv(ear, 3);
-      logDebug(`Combo length: ${res.length}`);
-      break;
+    case 'combo': res=subdiv(ear,3); logDebug(`Combo length: ${res.length}`); break;
     case 'full_pipeline':
-      res = ear;
-      if (cIt > 0) {
-        res = chaikinIter(res, cIt);
-        logDebug(`After chaikin: ${res.length}`);
-      }
-      res = earcutRolling(res, wSz);
-      logDebug(`Final earcut: ${res.length}`);
-      break;
+      res=ear; if(cIt>0){ res=chaikinIter(res,cIt); logDebug(`After chaikin: ${res.length}`);}
+      res=earcutRolling(res,wSz); logDebug(`Final earcut: ${res.length}`); break;
   }
-  if (cIt > 0 && alg !== 'full_pipeline') {
-    res = chaikinIter(res, cIt);
-    logDebug(`Applied Chaikin to ${alg}: ${res.length}`);
-  }
-  const color = alg === 'combo' ? 'green' : alg === 'full_pipeline' ? 'magenta' : alg.includes('bezier') ? 'purple' : 'blue';
-  drawPath(res, color);
+  if(cIt>0 && alg!=='full_pipeline'){ res=chaikinIter(res,cIt); logDebug(`Chaikin -> ${res.length}`);} 
+  const color = alg==='combo'?'green':alg==='full_pipeline'?'magenta':alg.includes('bezier')?'purple':'blue';
+  drawPath(res,color);
 }
 
-// Attach buttons and init
-document.getElementById('run').onclick = runSelectedPath;
-document.getElementById('randomize').onclick = () => { randomizeObstacles(); runSelectedPath(); };
+/* ───────────── UI bindings ───────────── */
+document.getElementById('run').onclick       = runSelectedPath;
+document.getElementById('randomize').onclick = ()=>{ randomizeObstacles(); runSelectedPath(); };
 
-// Initial setup
-randomizeObstacles();
-runSelectedPath();
+/* ───────────── boot ───────────── */
+randomizeObstacles(); runSelectedPath();
 </script>
 </body>
 </html>
