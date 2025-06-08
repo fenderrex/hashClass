@@ -44,3 +44,8 @@ Seeing What’s Happening
 The little gray box (debug) tells you how many squares it looked at, how many bumps it smoothed, and other fun numbers so you know it’s working.
 
 So every time you press “Run,” it’s like asking the computer: “Hey, what’s the best way to drive my red car across these squares without hitting the rocks?” And it draws you that neat, colorful path!
+
+## Running the Demo on Windows
+
+A batch file `install_and_start.bat` is included to help install dependencies and run `star.py`. Double-click the file or run it from the command prompt. It creates a virtual environment on your Desktop, installs the required packages, and launches the demo with `abbb1.png`.
+
