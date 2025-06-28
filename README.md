@@ -1,4 +1,5 @@
-Okay, little buddy, imagine you have a big piece of graph paper and some toy rocks, and you want to draw a line from your red toy car to your green toy castle without bumping into the rocks. Here’s how the “computer game” you showed works:
+A map overlay in pathconvergance.html?key= where the key is your doodle map key m files are to run a simulation and capture photos and segnet is well understood 13.py if inferencing segnet files. send the zip file to main branch and deleted the zip file georef takes osm data and pumps it out with a special file name! news boundaries are in the name are are used by pathconvergance.html
+
 
 
 A Big Drawing Board
