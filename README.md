@@ -59,7 +59,7 @@ This section explains the controls used for managing map overlays, opacity, draw
 #### `Choose File`
 - Upload a custom image overlay (e.g., segmented mask or transparency map).
 - The selected image is layered over the base map for pixel sampling or masking.
-
+- based on OSM data exported from georefv1
 ---
 
 ### 🌈 Opacity
