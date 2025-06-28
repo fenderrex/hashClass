@@ -1,82 +1,132 @@
-Welcome to your interactive grid world! This tool helps you explore how a car finds its way to a goal while avoiding obstacles — all while looking great on the map.
+# 🗺️ PathConvergence Web App
 
-🎨 The Drawing Area
-There’s a big canvas — like your playmat — where everything happens.
+**PathConvergence** is a browser-based tool that finds and visualizes the optimal path between two points on a map image. It uses transparency-based obstacle detection and path smoothing algorithms to generate clean, realistic paths over grid-aligned environments.
 
-It’s split into grid squares. You can make the squares bigger or smaller using the grid size box.
+This project is ideal for experimenting with A* pathfinding, image-based navigation, segmentation overlays, and simulation of real-world environments like roads, sidewalks, and custom regions.
 
-🚗 Start and Goal
-A red circle is your car (start point).
+---
 
-A green circle is your castle (goal point).
+## 🚀 Demo Preview
 
-You can drag them anywhere to set new locations.
+> “What’s the smartest way across this image map, without walking into invisible (transparent) zones?”
 
-⛰️ Obstacles
-Black circles are rocks that block the car.
+**PathConvergence** answers that question with a clean, colorful route.
 
-Click “Randomize Obstacles” to drop 8 new rocks in random spots.
+---
 
-📍 Finding the Path
-Click “Run” and the computer will:
+## 🔧 Features
 
-Look at the grid
+### 🖼️ Image-Based Map Overlays
+- Upload any **PNG** or similar image to serve as a map.
+- The **alpha channel (transparency)** determines walkability:
+  - Alpha below threshold = ⛔ not walkable
+  - Alpha above threshold = ✅ walkable
+- Adjustable threshold slider to fine-tune sensitivity.
 
-Avoid rocks
+### 🟢 Start and 🔴 Goal Placement
+- Click anywhere on the canvas to reposition start and goal.
+- Left or right click sets each point interchangeably.
 
-Find a safe route from car to castle
+### ⛰️ Obstacle Detection
+- Transparent zones from the uploaded image are treated as impassable.
+- Optional **“Randomize Obstacles”** button creates test barriers (rocks).
 
-✏️ Path Smoothing – “Magic Crayons”
-After finding a basic step-by-step route, the simulator makes it prettier using smoothing algorithms:
+### ✏️ Path Smoothing Modes
+Enhance the visual quality and realism of your path:
+- `A* + Earcut` – Fast triangle-meshed path
+- `+ Bézier` – Adds curved transitions to reduce sharp corners
+- `+ Chaikin` – Further softens curves into flowing lines
+- `Full Pipeline` – Combines all of the above for a polished look
 
-A + Earcut* → Simple path with triangles
+### 📍 Map Overlays via Key
+- Load maps dynamically using: Upload B/W Map: or the file picked in the menu. ## 🧭 UI Control Panel Guide
 
-+ Bézier → Adds curved lines
+This section explains the controls used for managing map overlays, opacity, drawing, and exports in the PathConvergence web app.
 
-+ Chaikin → Makes it soft and flowing
+---
 
-Full Pipeline → All of the above together!
+### 🔘 Buttons and Inputs
 
-Choose your smoothing style in the dropdown.
+#### `Hide Panel` / `Show Panel`
+- Toggle visibility of this control panel itself.
 
-🧠 Debug Info
-The gray debug box shows behind-the-scenes stats:
+#### `Hide Base Map` / `Show Base Map`
+- Toggle the visibility of the main base map image (useful when comparing overlays or mask outputs).
 
-How many squares were checked
+#### `Pick Random Start & Goal`
+- Automatically places start (red) and goal (green) markers at random walkable points.
 
-How smooth the path became
+#### `Choose File`
+- Upload a custom image overlay (e.g., segmented mask or transparency map).
+- The selected image is layered over the base map for pixel sampling or masking.
 
-And more info to track performance
+---
 
-🖼️ Map Overlays
-The tool uses a map overlay called pathconvergance.html?key=YOUR_KEY_HERE, where key is your doodle map key.
+### 🌈 Opacity
 
-This page helps match real-world boundaries with paths.
+#### `Opacity Slider`
+- Adjusts the transparency of the uploaded overlay image.
+- Helps you blend the overlay with the base map to visually inspect walkability.
 
-New map boundaries are included in the name and are used directly by pathconvergance.html.
+#### `Full Opacity`
+- Forces the overlay image to full opacity (ignores slider).
+- Helpful for clean binary visual comparisons.
 
-🤖 Simulation & SegNet
-Simulation photos and predictions are handled automatically.
+---
 
-SegNet is used for segmentation (like roads or sidewalks).
+### 🗺️ Geo Coordinates
 
-You can run predictions with the file 13.py using SegNet files.
+Set real-world bounds (optional, for georeferenced exports):
 
-🖥️ Running It on Windows
-To get started easily:
+- **South Latitude**: Bottom boundary of the map
+- **West Longitude**: Left boundary
+- **North Latitude**: Top boundary
+- **East Longitude**: Right boundary
 
-Run the included file: install_and_start.bat
+These values are required for accurate **GeoJSON** exports.
 
-It will:
+---
 
-Create a virtual Python environment on your Desktop
+### ✍️ Drawing Tools
 
-Install everything you need
+#### `Read Pixels`
+- Reads pixel data from the current overlay.
+- Used to extract walkable areas or define mask regions based on color/alpha.
 
-Launch the simulator with the image abbb1.png
+#### `Start Drawing`
+- Enables freehand drawing mode on the canvas.
+- You can manually trace or mark walkable/blocked regions.
 
-This tool is like asking your computer:
+---
 
-“What’s the smartest way to get from here to there, while dodging rocks and looking smooth doing it?”
+### 📤 Export Options
 
-And it draws that path just for you! 🎉
+#### `Export GeoJSON`
+- Outputs a vectorized version of the drawn or detected regions.
+- Requires geolocation bounds to be set.
+
+#### `Export PNG`
+- Saves a raster image of the current canvas.
+- Includes all overlays, masks, and drawings as shown on screen.
+
+---
+
+### 🎨 Mask Color
+
+- Displays the **current mask color** used during drawing.
+- Editable via color picker (click the colored box).
+- Drawn regions will be filled using this color.
+
+---
+
+### Example Workflow
+
+1. Upload your base map (e.g. a PNG showing sidewalks).
+2. Optionally upload a segmentation mask or overlay.
+3. Adjust opacity to see overlap clearly.
+4. Use `Read Pixels` or `Start Drawing` to trace or define regions.
+5. Export to GeoJSON if working with real-world coordinates, or export as PNG for training/visual inspection.
+
+---
+
+This control panel enables precise editing, visualization, and extraction of map data for simulations and training pipelines.
