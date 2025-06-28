@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OSM Road & Barrier Gradient Map</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; }
+    #controls {
+      position: fixed;
+      top: 10px; left: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 8px; border-radius: 4px;
+      z-index: 10;
+      max-height: 90vh; overflow-y: auto;
+      width: 240px;
+    }
+    #controls label, #controls fieldset { display: block; margin-top: 8px; }
+    #controls fieldset { border: 1px solid #ccc; padding: 8px; }
+    #controls button { margin-top: 8px; display: block; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label>Load OSM: <input id="osmFile" type="file" accept=".osm,.xml" /></label>
+    <label>Subdivisions: <input id="subdivisions" type="number" min="0" max="20" value="0" /></label>
+    <label><input id="binary" type="checkbox" /> Binary Mask</label>
+    <div id="typeControls"></div>
+    <button id="exportBtn" disabled>Export High-Res PNG</button>
+  </div>
+
+  <!-- single canvas -->
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const canvas    = document.getElementById('canvas');
+    const ctxMain   = canvas.getContext('2d');
+    const exportBtn = document.getElementById('exportBtn');
+
+    let roads       = [];
+    let bbox        = null;
+    let subdivCount = 0;
+    let showBinary  = false;
+
+    // ——— Utilities ———
+    function normalize(v) {
+      const len = Math.hypot(v.x, v.y);
+      return len ? { x: v.x/len, y: v.y/len } : { x:0, y:0 };
+    }
+    function perp(v) { return { x:-v.y, y:v.x }; }
+
+    function project(lat, lon, width, height) {
+      const { minLon, maxLon, minLat, maxLat } = bbox;
+      const dx = maxLon - minLon, dy = maxLat - minLat;
+      return {
+        x: ((lon - minLon)/dx) * width,
+        y: ((maxLat - lat)/dy) * height
+      };
+    }
+
+    function hexToRgb(hex) {
+      const h = hex.replace('#',''),
+            bi = parseInt(h,16);
+      return { r:bi>>16 & 255, g:bi>>8 & 255, b:bi & 255 };
+    }
+
+    function subdivide(nodes, count) {
+      if (count < 1) return nodes;
+      const out = [];
+      for (let i=0; i<nodes.length-1; i++) {
+        const A = nodes[i], B = nodes[i+1];
+        out.push(A);
+        for (let j=1; j<=count; j++) {
+          const t = j/(count+1);
+          out.push({
+            lat: A.lat + (B.lat - A.lat)*t,
+            lon: A.lon + (B.lon - A.lon)*t
+          });
+        }
+      }
+      out.push(nodes[nodes.length-1]);
+      return out;
+    }
+
+    // ——— Parse OSM ———
+    function parseOSM(text) {
+      const doc = new DOMParser().parseFromString(text,'application/xml');
+      const b = doc.querySelector('bounds');
+      if (!b) return [];
+      bbox = {
+        minLat: parseFloat(b.getAttribute('minlat')),
+        maxLat: parseFloat(b.getAttribute('maxlat')),
+        minLon: parseFloat(b.getAttribute('minlon')),
+        maxLon: parseFloat(b.getAttribute('maxlon'))
+      };
+
+      const nodesMap = {};
+      doc.querySelectorAll('node').forEach(n => {
+        nodesMap[n.getAttribute('id')] = {
+          lat: parseFloat(n.getAttribute('lat')),
+          lon: parseFloat(n.getAttribute('lon'))
+        };
+      });
+
+      const ways = [];
+      doc.querySelectorAll('way').forEach(w => {
+        const tags = Array.from(w.querySelectorAll('tag'));
+        const highwayTag = tags.find(t => t.getAttribute('k') === 'highway');
+        const barrierTag = tags.find(t =>
+          t.getAttribute('k') === 'barrier' &&
+          (t.getAttribute('v') === 'wall' || t.getAttribute('v') === 'gate')
+        );
+        if (!highwayTag && !barrierTag) return;
+
+        const type = highwayTag
+          ? highwayTag.getAttribute('v')
+          : barrierTag.getAttribute('v');
+
+        const refs = Array.from(w.querySelectorAll('nd'))
+                          .map(nd => nd.getAttribute('ref'))
+                          .filter(r => nodesMap[r]);
+        if (refs.length < 2) return;
+
+        ways.push({
+          nodes: refs.map(r => nodesMap[r]),
+          type
+        });
+      });
+
+      return ways;
+    }
+
+    // ——— UI for types ———
+    function setupTypeControls() {
+      const container = document.getElementById('typeControls');
+      container.innerHTML = '';
+      const types = Array.from(new Set(roads.map(r => r.type)));
+      types.forEach(type => {
+        const fs     = document.createElement('fieldset');
+        const legend = document.createElement('legend');
+        legend.textContent = type;
+        fs.appendChild(legend);
+
+        const defaultColor = type==='wall' ? '#8B4513'
+                          : type==='gate' ? '#FFA500'
+                          : '#0000ff';
+        const defaultWidth = (type==='wall'||type==='gate')?1:5;
+        const defaultMask  = 0.6;
+
+        // Color picker
+        let lbl = document.createElement('label');
+        lbl.innerHTML = `Color: <input type="color" id="color_${type}" value="${defaultColor}">`;
+        fs.appendChild(lbl);
+
+        // Width slider
+        lbl = document.createElement('label');
+        lbl.innerHTML = `Width: <input type="range" id="width_${type}" min="1" max="20" value="${defaultWidth}">`;
+        fs.appendChild(lbl);
+
+        // Mask threshold
+        lbl = document.createElement('label');
+        lbl.innerHTML = `Mask Threshold: <input type="range" id="mask_${type}" min="0" max="1" step="0.01" value="${defaultMask}">`;
+        fs.appendChild(lbl);
+
+        container.appendChild(fs);
+
+        // Redraw on any change
+        ['color','width','mask'].forEach(pref=>{
+          document.getElementById(`${pref}_${type}`)
+                  .addEventListener('change', draw);
+        });
+      });
+    }
+
+    // ——— Handlers ———
+    document.getElementById('osmFile').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        roads = parseOSM(reader.result);
+        setupTypeControls();
+        exportBtn.disabled = false;
+        draw();
+      };
+      reader.readAsText(file);
+    });
+
+    document.getElementById('subdivisions').addEventListener('change', e => {
+      subdivCount = +e.target.value;
+      draw();
+    });
+
+    document.getElementById('binary').addEventListener('change', e => {
+      showBinary = e.target.checked;
+      draw();
+    });
+
+    // ——— Retina‐ready resize ———
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width  = window.innerWidth  * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width  = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
+      ctxMain.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ——— Core rendering ———
+    function renderWay(nodesGeo, type, ctx, width, height) {
+      const pts = nodesGeo
+        .map(n => project(n.lat, n.lon, width, height))
+        .filter(p => isFinite(p.x) && isFinite(p.y));
+      if (pts.length < 2) return;
+
+      const rgb   = hexToRgb(document.getElementById(`color_${type}`).value);
+      const halfW = (+document.getElementById(`width_${type}`).value) / 2;
+
+      // compute perpendicular/bisector directions
+      const dirs = pts.map((p,i) => {
+        if (i === 0) {
+          const v = normalize({ x: pts[1].x - p.x, y: pts[1].y - p.y });
+          return perp(v);
+        }
+        if (i === pts.length - 1) {
+          const prev = pts[i-1];
+          const v = normalize({ x: p.x - prev.x, y: p.y - prev.y });
+          return perp(v);
+        }
+        const prev = pts[i-1], next = pts[i+1];
+        const v1 = normalize({ x: p.x - prev.x, y: p.y - prev.y });
+        const v2 = normalize({ x: next.x - p.x, y: next.y - p.y });
+        const bis = normalize({ x: v1.x + v2.x, y: v1.y + v2.y });
+        return perp(bis);
+      });
+
+      // draw each segment
+      for (let i=0; i<pts.length-1; i++) {
+        const A = pts[i], B = pts[i+1];
+        const dA = dirs[i], dB = dirs[i+1];
+        const A1 = { x:A.x + dA.x*halfW, y:A.y + dA.y*halfW };
+        const A2 = { x:A.x - dA.x*halfW, y:A.y - dA.y*halfW };
+        const B1 = { x:B.x + dB.x*halfW, y:B.y + dB.y*halfW };
+        const B2 = { x:B.x - dB.x*halfW, y:B.y - dB.y*halfW };
+
+        const mid   = { x:(A.x+B.x)/2, y:(A.y+B.y)/2 };
+        const axis  = perp(normalize({ x:B.x-A.x, y:B.y-A.y }));
+        const start = { x:mid.x - axis.x*halfW, y:mid.y - axis.y*halfW };
+        const end   = { x:mid.x + axis.x*halfW, y:mid.y + axis.y*halfW };
+
+        const grad = ctx.createLinearGradient(start.x, start.y, end.x, end.y);
+        grad.addColorStop(0,   `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
+        grad.addColorStop(0.5, `rgba(${rgb.r},${rgb.g},${rgb.b},1)`);
+        grad.addColorStop(1,   `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(A1.x, A1.y);
+        ctx.lineTo(B1.x, B1.y);
+        ctx.lineTo(B2.x, B2.y);
+        ctx.lineTo(A2.x, A2.y);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    function draw() {
+      const w = canvas.width, h = canvas.height;
+      const buf = document.createElement('canvas');
+      buf.width = w; buf.height = h;
+      const ctx = buf.getContext('2d');
+      ctx.clearRect(0,0,w,h);
+
+      roads.forEach(r => {
+        const pts = subdivide(r.nodes, subdivCount);
+        renderWay(pts, r.type, ctx, w, h);
+      });
+
+      if (showBinary) {
+        const img = ctx.getImageData(0,0,w,h);
+        const d   = img.data;
+        roads.forEach(r => {
+          const threshold = +document.getElementById(`mask_${r.type}`).value;
+          for (let i=0; i<d.length; i+=4) {
+            d[i+3] = (d[i+3]/255 > threshold ? 255 : 0);
+          }
+        });
+        ctxMain.clearRect(0,0,w,h);
+        ctxMain.putImageData(img,0,0);
+      } else {
+        ctxMain.clearRect(0,0,w,h);
+        ctxMain.drawImage(buf,0,0);
+      }
+    }
+
+    // ——— High-res export ———
+    exportBtn.addEventListener('click', () => {
+      if (!bbox) return alert("No map loaded!");
+      const scale = 6, dpr = window.devicePixelRatio || 1;
+      const exportW = canvas.width * scale / dpr;
+      const exportH = canvas.height * scale / dpr;
+
+      const bigC = document.createElement('canvas');
+      bigC.width  = exportW;
+      bigC.height = exportH;
+      const bigCtx = bigC.getContext('2d');
+
+      roads.forEach(r => {
+        const pts = subdivide(r.nodes, subdivCount);
+        bigCtx.save();
+        bigCtx.scale(scale, scale);
+        renderWay(pts, r.type, bigCtx, canvas.width, canvas.height);
+        bigCtx.restore();
+      });
+
+      if (showBinary) {
+        const img = bigCtx.getImageData(0,0,exportW,exportH);
+        const d   = img.data;
+        roads.forEach(r => {
+          const threshold = +document.getElementById(`mask_${r.type}`).value;
+          for (let i=0; i<d.length; i+=4) {
+            d[i+3] = (d[i+3]/255 > threshold ? 255 : 0);
+          }
+        });
+        bigCtx.clearRect(0,0,exportW,exportH);
+        bigCtx.putImageData(img,0,0);
+      }
+
+      bigC.toBlob(blob => {
+        const fmt   = v => v.toFixed(6).replace(/\./g,'_');
+        const epoch = Math.floor(Date.now()/1000);
+        const { minLon, minLat, maxLon, maxLat } = bbox;
+        const name = `overlay_t${epoch}`
+                   + `_w${fmt(minLon)}_s${fmt(minLat)}`
+                   + `_e${fmt(maxLon)}_n${fmt(maxLat)}.png`;
+
+        const a = document.createElement('a');
+        a.href     = URL.createObjectURL(blob);
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+      });
+    });
+  </script>
+</body>
+</html>
