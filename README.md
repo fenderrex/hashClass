@@ -1,8 +1,21 @@
-# 🗺️ PathConvergence Web App
+# 🗺️ PathConvergence Web App & Meshtastic Tools
+
+This repository contains two main components:
+
+## 1. PathConvergence Web App
 
 **PathConvergence** is a browser-based tool that finds and visualizes the optimal path between two points on a map image. It uses transparency-based obstacle detection and path smoothing algorithms to generate clean, realistic paths over grid-aligned environments.
 
 This project is ideal for experimenting with A* pathfinding, image-based navigation, segmentation overlays, and simulation of real-world environments like roads, sidewalks, and custom regions.
+
+## 2. Meshtastic Serial Protocol Tools
+
+Complete suite of tools for Meshtastic device communication:
+- **meshtastic_ftp.py** - File transfer protocol with CRC-16 checksums
+- **meshtastic_ftp_client.py** - CLI client for file operations
+- **meshtastic_monitor.py** - Multi-port signal layer monitor and debugger
+
+See [MESHTASTIC_FTP_PROTOCOL.md](MESHTASTIC_FTP_PROTOCOL.md) and [MESHTASTIC_MONITOR_GUIDE.md](MESHTASTIC_MONITOR_GUIDE.md) for detailed documentation.
 
 ---
 
@@ -130,3 +143,44 @@ These values are required for accurate **GeoJSON** exports.
 ---
 
 This control panel enables precise editing, visualization, and extraction of map data for simulations and training pipelines.
+
+---
+
+## 📦 Installation
+
+### PathConvergence
+No installation required! Just open `pathconvergance.html` in a web browser.
+
+### Meshtastic Tools
+
+```bash
+# Install dependencies
+pip install pyserial
+
+# Run FTP client
+python meshtastic_ftp_client.py --help
+
+# Run signal monitor
+python meshtastic_monitor.py --help
+
+# Run tests
+python test_meshtastic_ftp.py
+```
+
+### Quick Start - Meshtastic
+
+```bash
+# Monitor all Meshtastic devices
+python meshtastic_monitor.py --auto
+
+# List files on device
+python meshtastic_ftp_client.py --port /dev/ttyUSB0 list /
+
+# Download file
+python meshtastic_ftp_client.py --port /dev/ttyUSB0 get /data/log.txt ./log.txt
+
+# Test without hardware (simulation mode)
+python meshtastic_ftp_client.py --simulate list /
+```
+
+See the documentation files for detailed usage instructions.
