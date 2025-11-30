@@ -85,11 +85,20 @@ class Message:
     hop_count: int = 0  # Number of hops
     snr: float = 0.0  # Signal-to-noise ratio
     rssi: int = 0  # Received signal strength
+    latitude: Optional[float] = None  # GPS latitude
+    longitude: Optional[float] = None  # GPS longitude
+    altitude: Optional[int] = None  # GPS altitude in meters
     raw_packet: dict = field(default_factory=dict)
+
+    def get_google_maps_link(self) -> Optional[str]:
+        """Generate Google Maps link if location available"""
+        if self.latitude is not None and self.longitude is not None:
+            return f"https://maps.google.com/?q={self.latitude},{self.longitude}"
+        return None
 
     def to_dict(self):
         """Convert to dictionary for JSON output"""
-        return {
+        result = {
             'timestamp': self.timestamp,
             'timestamp_unix': self.timestamp_unix,
             'channel': self.channel,
@@ -102,8 +111,16 @@ class Message:
             'airtime_ms': self.airtime_ms,
             'hop_count': self.hop_count,
             'snr': self.snr,
-            'rssi': self.rssi
+            'rssi': self.rssi,
+            'latitude': self.latitude,
+            'longitude': self.longitude,
+            'altitude': self.altitude
         }
+        # Add Google Maps link if location available
+        maps_link = self.get_google_maps_link()
+        if maps_link:
+            result['google_maps'] = maps_link
+        return result
 
     def to_csv_row(self):
         """Convert to CSV row"""
@@ -119,7 +136,11 @@ class Message:
             f"{self.airtime_ms:.2f}",
             str(self.hop_count),
             f"{self.snr:.1f}",
-            str(self.rssi)
+            str(self.rssi),
+            str(self.latitude) if self.latitude is not None else "",
+            str(self.longitude) if self.longitude is not None else "",
+            str(self.altitude) if self.altitude is not None else "",
+            self.get_google_maps_link() or ""
         ]
 
     def to_text(self):
@@ -144,7 +165,12 @@ class Message:
             else:
                 signal_info += "]"
 
-        return f"{self.timestamp} {type_tag}{me_tag}{self.channel:4s} {sender_display:12s}{hop_info}{signal_info}: {self.text}"
+        # Add location info if available (but not if already in text)
+        location_info = ""
+        if self.latitude and self.longitude and "Position:" not in self.text:
+            location_info = f" 📍({self.latitude:.6f},{self.longitude:.6f})"
+
+        return f"{self.timestamp} {type_tag}{me_tag}{self.channel:4s} {sender_display:12s}{hop_info}{signal_info}{location_info}: {self.text}"
 
 
 @dataclass
@@ -177,17 +203,18 @@ class MeshtasticPipe:
     LORA_PREAMBLE_MS = 50
     LORA_BYTE_MS = 5.0
 
-    def __init__(self, pipe_mode=False, channel_filter=None, output_format='text'):
+    def __init__(self, pipe_mode=False, channel_filter=None, output_format='text', proxy_mode=False, send_channel=0):
         self.interface: Optional[meshtastic.serial_interface.SerialInterface] = None
         self.messages: deque = deque(maxlen=10000)  # Larger buffer for piping
         self.message_queue: queue.Queue = queue.Queue()
         self.running = True
         self.input_buffer = ""
-        self.current_channel = 0
+        self.current_channel = send_channel
         self.my_node_id = None
 
         # Pipe mode settings
         self.pipe_mode = pipe_mode
+        self.proxy_mode = proxy_mode  # Bidirectional proxy mode (stdin→mesh, mesh→stdout)
         self.channel_filter: Set[str] = set(channel_filter) if channel_filter else set()
         self.output_format = output_format
 
@@ -197,7 +224,7 @@ class MeshtasticPipe:
             import io
             self.csv_writer = csv.writer(sys.stdout)
             # Write header
-            self.csv_writer.writerow(['timestamp', 'channel', 'sender', 'sender_id', 'sender_name', 'type', 'text', 'is_own', 'airtime_ms', 'hop_count', 'snr', 'rssi'])
+            self.csv_writer.writerow(['timestamp', 'channel', 'sender', 'sender_id', 'sender_name', 'type', 'text', 'is_own', 'airtime_ms', 'hop_count', 'snr', 'rssi', 'latitude', 'longitude', 'altitude', 'google_maps'])
             sys.stdout.flush()
 
         # Node database for name lookup
@@ -367,8 +394,12 @@ class MeshtasticPipe:
             elif 'mqtt' in str(packet).lower():
                 packet_type = "MQTT"
 
-            # Get message text
+            # Get message text and location data
             text = ""
+            latitude = None
+            longitude = None
+            altitude = None
+
             if 'decoded' in packet and 'text' in packet['decoded']:
                 text = packet['decoded']['text']
             elif 'decoded' in packet and 'payload' in packet['decoded']:
@@ -380,7 +411,28 @@ class MeshtasticPipe:
                         text = f"[Binary: {len(payload)} bytes]"
                 else:
                     text = str(payload)
-            else:
+
+            # Extract GPS position if this is a position packet
+            if portnum == portnums_pb2.POSITION_APP and 'decoded' in packet:
+                try:
+                    if 'position' in packet['decoded']:
+                        pos = packet['decoded']['position']
+                        # Meshtastic sends lat/lon as integers (degrees * 1e7)
+                        if 'latitudeI' in pos:
+                            latitude = pos['latitudeI'] / 1e7
+                        if 'longitudeI' in pos:
+                            longitude = pos['longitudeI'] / 1e7
+                        if 'altitude' in pos:
+                            altitude = pos['altitude']
+
+                        # Update text to show position
+                        if latitude and longitude:
+                            maps_link = f"https://maps.google.com/?q={latitude},{longitude}"
+                            text = f"Position: {latitude:.6f}, {longitude:.6f} (alt: {altitude}m) {maps_link}"
+                except:
+                    pass
+
+            if not text:
                 text = f"[{portnum}]"
 
             # Estimate airtime
@@ -402,6 +454,9 @@ class MeshtasticPipe:
                 hop_count=hop_count,
                 snr=snr,
                 rssi=rssi,
+                latitude=latitude,
+                longitude=longitude,
+                altitude=altitude,
                 raw_packet=packet
             )
 
@@ -489,17 +544,49 @@ class MeshtasticPipe:
             if self.pipe_mode:
                 print(f"Send error: {e}", file=sys.stderr)
 
+    def stdin_reader_thread(self):
+        """Thread to read from stdin and send to mesh (proxy mode)"""
+        try:
+            for line in sys.stdin:
+                if not self.running:
+                    break
+                line = line.rstrip('\n\r')
+                if line:  # Only send non-empty lines
+                    self.send_message(line, channel=self.current_channel)
+        except Exception as e:
+            print(f"stdin reader error: {e}", file=sys.stderr)
+        finally:
+            self.running = False
+
     def run_pipe_mode(self):
         """Run in pipe mode (non-interactive)"""
-        print("Press Ctrl+C to stop...", file=sys.stderr)
-        try:
-            while self.running:
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            if self.interface:
-                self.interface.close()
+        if self.proxy_mode:
+            print("Proxy mode: stdin→mesh (Ch{}) | mesh→stdout".format(self.current_channel), file=sys.stderr)
+            print("Type messages and press Enter to send...", file=sys.stderr)
+
+            # Start stdin reader thread
+            stdin_thread = threading.Thread(target=self.stdin_reader_thread, daemon=True)
+            stdin_thread.start()
+
+            try:
+                while self.running:
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                if self.interface:
+                    self.interface.close()
+        else:
+            print("Pipe mode: mesh→stdout (receive only)", file=sys.stderr)
+            print("Press Ctrl+C to stop...", file=sys.stderr)
+            try:
+                while self.running:
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                if self.interface:
+                    self.interface.close()
 
     # UI mode functions (same as original terminal)
     def handle_command(self, cmd: str):
@@ -756,12 +843,22 @@ Examples:
 
   # Pipe and filter
   %(prog)s --pipe | grep "emergency"
+
+  # Bidirectional proxy mode (like PuTTY for Meshtastic)
+  %(prog)s --pipe --proxy --send-channel 0
+  echo "Hello mesh!" | %(prog)s --pipe --proxy
         ''',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
     parser.add_argument('--pipe', action='store_true',
                         help='Run in pipe mode (non-interactive, output to stdout)')
+
+    parser.add_argument('--proxy', action='store_true',
+                        help='Enable bidirectional proxy mode: read from stdin and send to mesh, while outputting received messages to stdout')
+
+    parser.add_argument('--send-channel', type=int, default=0,
+                        help='Channel to send messages on in proxy mode (default: 0)')
 
     parser.add_argument('--channel', '--channels', type=str,
                         help='Filter by channel(s). Comma-separated list. Examples: PM, Ch0, "Ch0,Ch1,PM"')
@@ -788,7 +885,9 @@ def main():
     terminal = MeshtasticPipe(
         pipe_mode=args.pipe,
         channel_filter=channel_filter,
-        output_format=args.format
+        output_format=args.format,
+        proxy_mode=args.proxy,
+        send_channel=args.send_channel
     )
 
     try:
