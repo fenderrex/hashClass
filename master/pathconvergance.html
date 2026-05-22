@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Box Overlay</title>
+  <style>
+    html, body { height: 100%; margin: 0; padding: 0; }
+    #map { width: 100%; height: 100%; }
+    #controls {
+      position: fixed; bottom: 10px; left: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 10px; border-radius: 4px;
+      font-family: sans-serif; font-size: 14px;
+      z-index: 5; width: 220px;
+    }
+    #controls input[type="file"],
+    #controls input[type="range"],
+    #controls input[type="number"] {
+      width: 100%; margin-top: 4px; margin-bottom: 8px;
+    }
+	.hidden {
+	  display: none !important;
+	}
+  </style>
+</head>
+<body>
+  <h2>Dynamic Path Planner left or right click to start placing start points and goals</h2>
+
+  <!-- Map upload -->
+  <label for="mapUpload">Upload B/W Map:&nbsp;</label>
+  <input id="mapUpload" type="file" accept="image/*"><br>
+
+  <!-- Grid size -->
+  <label for="gridSizeInput">Grid Size (px): </label>
+  <input id="gridSizeInput" type="number" min="1" max="100" value="1" style="width:60px;"><br>
+  <label>Binary Threshold (top half): <input id="binary" type="range" min="0" max="1" step="0.01" value="0.75"></label>
+
+  <canvas id="canvas" width="1800" height="1600"></canvas><br>
+
+  <select id="algorithm">
+    <option value="astar_corridor_earcut">A* + Earcut</option>
+    <option value="astar_corridor_earcut_bezier">A* + Earcut + Bézier</option>
+    <option value="astar_corridor_earcut_bezier_second">A* + Earcut + Bézier + 2nd A*</option>
+    <option value="astar_corridor_dijkstra_smooth">A* + Dijkstra Smooth</option>
+    <option value="combo">Combo Earcut+Subdiv</option>
+    <option value="full_pipeline">A* + Earcut + Bézier + Chaikin + Earcut (Rolling)</option>
+  </select>
+  <label>Chaikin Iterations: <input id="chaikinIter" type="number" min="0" max="10" value="1"></label>
+  <label>Rolling Window Size: <input id="windowSize" type="number" min="1" max="20" value="5"></label>
+  <button id="run">Run</button>
+  <button id="randomize">Randomize Obstacles</button>
+
+  <div id="legend">
+    <div><span class="color-box" style="background: gold;"></span> Direct Bresenham</div>
+    <div><span class="color-box" style="background: blue;"></span> A* + Earcut</div>
+    <div><span class="color-box" style="background: purple;"></span> + Bézier</div>
+    <div><span class="color-box" style="background: orange;"></span> + 2nd A*</div>
+    <div><span class="color-box" style="background: cyan;"></span> Chaikin Smoothed</div>
+    <div><span class="color-box" style="background: green;"></span> Combo Earcut+Subdiv</div>
+    <div><span class="color-box" style="background: magenta;"></span> Full Pipeline Rolling Earcut</div>
+  </div>
+<button id="circlePanBtn" style="position: fixed; top: 10px; right: 10px; z-index: 1000;">
+  Start Circle Pan
+</button>
+  <div id="debug">Debug output will appear here.</div>
+  <button id="usergui1" onclick="toggleControls()">Hide Panel</button>
+  <hr>
+<div id="map"></div>
+<label id="floatingBox" style="font-family:sans-serif;">
+  <input id="runningBox"  style="  position: fixed;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;"
+    type="checkbox"
+    onchange="
+     
+      var d = document.getElementById('blackOut');if (!d) return;
+      // black or transparent
+      d.style.backgroundColor = this.checked ? 'black' : 'transparent';
+      // full opacity if blacked out; otherwise whatever the slider says
+
+	  const s = document.getElementById('opacity');
+      s.value = this.checked ? 1 : 0;
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+    "
+  />   <input id="pause"  style="  position: fixed;
+    top: 10px;
+    left: 55%;
+    transform: translateX(-50%);
+    z-index: 1000;"
+    type="checkbox"
+   
+  /> Black Background
+</label>
+<div id="controls">
+<label for="progressBar">Progress:</label>
+<progress id="progressBar" value="0" max="100" style="width: 100%;"></progress>
+ <button id="usergui1" onclick="toggleControls()">Hide Panel</button>
+<button onclick="hideMapTiles()">Hide Base Map</button>
+<button onclick="showMapTiles()">Show Base Map</button>
+<button id="randomPair">Pick Random Start & Goal</button>
+
+  <label>Load overlay image:<br>
+    <input type="file" id="imageLoader" accept="image/png">
+  </label>
+
+  <label>Opacity:<br>
+    <input id="opacity" type="range" min="0" max="1" step="0.01" value="0.7">
+  </label>
+<label style="font-family: sans-serif; display: inline-flex; align-items: center;">
+  <input
+    type="checkbox"
+    onchange="
+	
+      const s = document.getElementById('opacity');
+      s.value = this.checked ? 1 : 0;
+      s.dispatchEvent(new Event('input', { bubbles: true }));
+    "
+    style="margin-right:4px;"
+  />
+  Full opacity
+</label>
+  <label>South Latitude:<br>
+    <input type="number" id="south" step="0.0001">
+  </label>
+  <label>West Longitude:<br>
+    <input type="number" id="west" step="0.0001">
+  </label>
+  <label>North Latitude:<br>
+    <input type="number" id="north" step="0.0001">
+  </label>
+  <label>East Longitude:<br>
+    <input type="number" id="east" step="0.0001">
+  </label>
+  
+  <button onclick="extractGoogleMapPixelsFromExistingCanvas()">Read Pixels</button>
+
+    <button id="toggle-draw">Start Drawing</button>
+  <button id="export-geojson">Export GeoJSON</button>
+  <button id="export-png">Export PNG</button>
+  <label>
+  Mask Color:
+  <input type="color" id="maskColor" value="#ff0000">
+</label>
+</div>
+  <div id="map"></div>
+  <div id="debug"></div>
+
+
+  <script src="maplogic.js"></script>
+  <script src="pathlogic.js"></script>
+</body>
+</html>

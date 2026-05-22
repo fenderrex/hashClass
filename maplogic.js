@@ -1,32 +1,21 @@
-let map;
-let overlay = null;
-let underlay = null;
-let imageUrl = null;
-const obstacles = [];
-const blockedSet = new Set();
-const NONblockedSet = new Set();
-let dragging = null;
-let polylinePath = null;
-let pathPanInterval = null;
-let isPanning = false;
-let circlePanInterval = null;
-let circleAngle = 0;
-const circleRadiusMeters = 200;
-const drawnShapes = [];
 const canvas   = document.getElementById('canvas');
 const ctx      = canvas.getContext('2d');
 const debugEl  = document.getElementById('debug');
 const gridInput= document.getElementById('gridSizeInput');
 const mapUpload= document.getElementById('mapUpload');
+
 let gridSize = parseInt(gridInput.value,10);
 let cols = Math.floor(canvas.width / gridSize);
 let rows = Math.floor(canvas.height/ gridSize);
+
 let start = { x: 2,      y: 2 };
 let goal  = { x: cols-3, y: rows-3 };
-//const obstacles   = [];         // fallback circles
-//const blockedSet  = new Set();  // per-cell blocks from image
-//const NONblockedSet  = new Set();  // per-cell blocks from image
-//let dragging = null;
+
+const obstacles   = [];         // fallback circles
+const blockedSet  = new Set();  // per-cell blocks from image
+const NONblockedSet  = new Set();  // per-cell blocks from image
+let dragging = null;
+
 /* ───────────── debug helpers ───────────── */
 const logDebug  = m => { debugEl.textContent += m + '\n'; debugEl.scrollTop = debugEl.scrollHeight; };
 const clearDebug= () => { debugEl.textContent = ''; };
@@ -49,7 +38,7 @@ function debounce(func, delay) {
     timeout = setTimeout(() => func.apply(this, args), delay);
   };
 }
-document.getElementById('binary').addEventListener('change', () => {
+document.getElementById('binary').addEventListener('input', () => {
   applyBinaryThresholdFromSlider();
   runSelectedPath();
 });
@@ -57,6 +46,10 @@ document.getElementById('binary').addEventListener('change', () => {
 
 function applyBinaryThresholdFromSlider() {
   if (!window.originalImageData) return;
+
+  // Respect binary layer toggle
+  const binaryToggle = document.getElementById('binaryToggle');
+  if (binaryToggle && !binaryToggle.checked) return;
 
   // Clone original data (non-destructive)
   const imageData = new ImageData(
@@ -85,7 +78,54 @@ function applyBinaryThresholdFromSlider() {
     }
   }
 
+  // Apply binary layer opacity via globalAlpha
+  const binaryAlpha = (window.binaryLayerOpacity !== undefined) ? window.binaryLayerOpacity : 1.0;
+  ctx.save();
+  ctx.globalAlpha = binaryAlpha;
   ctx.putImageData(imageData, 0, 0);
+  ctx.restore();
+
+  // Also write clean thresholded image to binary buffer (no grid/paths/opacity)
+  window.binaryBufferCanvas.width = imageData.width;
+  window.binaryBufferCanvas.height = imageData.height;
+  window.binaryBufferCtx.putImageData(imageData, 0, 0);
+
+  // Update the binary preview thumbnail
+  if (window.canvasOverlays && window.canvasOverlays.binary) {
+    window.canvasOverlays.binary.setPreviewFromImageData(imageData);
+  }
+
+  // Build inverted binary data (white=transparent, black=visible) and push to inverted overlay
+  buildAndPushInvertedBinary(imageData);
+}
+
+function buildAndPushInvertedBinary(sourceImageData) {
+  // Clone and invert: blocked cells become opaque black, non-blocked become transparent
+  const invData = new ImageData(
+    new Uint8ClampedArray(sourceImageData.data),
+    sourceImageData.width,
+    sourceImageData.height
+  );
+  const d = invData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    // In the source, alpha=0 means blocked/transparent, alpha=255 means non-blocked/white
+    // Invert: flip the alpha and set RGB to black for the formerly-blocked cells
+    if (d[i + 3] === 0) {
+      // Was transparent (blocked) -> now visible black
+      d[i] = 0; d[i + 1] = 0; d[i + 2] = 0; d[i + 3] = 255;
+    } else {
+      // Was opaque (non-blocked/white) -> now transparent
+      d[i + 3] = 0;
+    }
+  }
+
+  // Write to inverted buffer canvas
+  window.invertedBinaryBufferCanvas.width = invData.width;
+  window.invertedBinaryBufferCanvas.height = invData.height;
+  window.invertedBinaryBufferCtx.putImageData(invData, 0, 0);
+
+  // Push to the inverted overlay on the map
+  pushInvertedBinaryToMapOverlay();
 }
 
 /* ───────────── image upload ───────────── */
@@ -140,6 +180,8 @@ const data = imageData.data;    blockedSet.clear();
 				  //alert("cool");
 	  randomizeStartAndGoal();
     logDebug(`Map loaded – blocked cells: ${blockedSet.size}`);
+    // Apply initial threshold to populate buffer + preview
+    applyBinaryThresholdFromSlider();
     runSelectedPath();
   };
   const rdr=new FileReader();
@@ -176,7 +218,7 @@ function randomizeStartAndGoal() {
     j = Math.floor(Math.random() * cells.length);
   } while (j === i);
 
-  // parse “x,y” → { x: Number, y: Number }
+  // parse "x,y" -> { x: Number, y: Number }
   const [x1, y1] = cells[i].split(',').map(Number);
   const [x2, y2] = cells[j].split(',').map(Number);
 
@@ -235,12 +277,20 @@ function drawPoints(){
 }
 function drawPath(path,color){
   if(!path||path.length<2) return;
+  // Respect trace layer toggle
+  const traceToggle = document.getElementById('traceToggle');
+  if (traceToggle && !traceToggle.checked) return;
+  // Respect trace layer opacity
+  const traceAlpha = (window.traceOpacity !== undefined) ? window.traceOpacity : 1.0;
+  ctx.save();
+  ctx.globalAlpha = traceAlpha;
   ctx.strokeStyle=color; ctx.lineWidth=2;
   ctx.beginPath(); ctx.moveTo((path[0].x+0.5)*gridSize,(path[0].y+0.5)*gridSize);
   path.forEach(p=>ctx.lineTo((p.x+0.5)*gridSize,(p.y+0.5)*gridSize));
   ctx.stroke();
   ctx.fillStyle=color;
   path.forEach(p=>{ ctx.beginPath(); ctx.arc((p.x+0.5)*gridSize,(p.y+0.5)*gridSize,3,0,2*Math.PI); ctx.fill();});
+  ctx.restore();
 }
 
 /* ───────────── mouse drag start/goal ───────────── */
@@ -277,9 +327,9 @@ canvas.addEventListener('mousedown', e => {
     return;
   }
 
-  if (e.button === 0) {         // left-click → start
+  if (e.button === 0) {         // left-click -> start
     start = nearest;
-  } else if (e.button === 2) {  // right-click → goal
+  } else if (e.button === 2) {  // right-click -> goal
     goal = nearest;
   } else {
     return; // ignore middle-click
@@ -312,11 +362,6 @@ function bresenhamCells(a,b){
     if(e2< dx){ err+=dx; y0+=sy; }
   }
   return pts;
-}
-function getRed(x, y) {
-  if (!window.originalImageData) return 0;
-  const i = (y * window.originalImageData.width + x) * 4;
-  return window.originalImageData.data[i]; // Red channel
 }
 
 /* ───────────── A* with Bresenham bias ───────────── */
@@ -368,16 +413,10 @@ function astarBetween(s, g, lineSet, callbacks = {}) {
       // cost bias
       //const stepCost = lineSet.has(nh) ? 0.5 : 1;
 	  const baseCost = lineSet.has(nh) ? 0.5 : 1;
-
-const red = getRed(nx, ny);
-const redBonus = red / 255;  // range 0–1
-
-const pixelAlpha = getAlpha(nx, ny);
-const transparencyCost = 1 - ((pixelAlpha / 2) / (255 / 2));
-
-// Favor high-red pixels (subtract up to 0.4)
-const stepCost = baseCost + (transparencyCost * 1.6) - (redBonus * 0.4);  
-    const tentative = gScore.get(hash(current)) + stepCost;
+	  const pixelAlpha = getAlpha(nx, ny);
+	  const transparencyCost = 1 - ((pixelAlpha/2) / (255/2));
+	  const stepCost = baseCost + (transparencyCost * 2);  // e.g. weight = 2
+      const tentative = gScore.get(hash(current)) + stepCost;
 
       if (tentative < (gScore.get(nh) ?? Infinity)) {
         cameFrom[nh] = current;
@@ -471,23 +510,18 @@ function applyAlphaThreshold() {
   };
 }
 document.getElementById('binary').addEventListener('input', applyAlphaThreshold);
-//let polylinePath = null;
+let polylinePath = null;
 /* ───────────── main run ───────────── */
-// LIMIT_RECURSION: ensures no more than 3 nested runs
-function runSelectedPath(depth = 0)  { // depth tracks recursion, max 3) {
-  // Removed unused 'y' parameter to avoid confusion
-  applyBinaryThresholdFromSlider();
+function runSelectedPath(depth = 0)  {
   clearDebug(); logDebug(`Run: ${new Date().toLocaleTimeString()}`);
   drawGrid(); drawObs();
   drawPoints();
 
-  // Cache DOM references (e.g., binary checkbox, thresholdInput) outside this function for performance
   if (document.getElementById('binary').checked) {
-    // TODO: `thresholdInput` may be undefined; cache DOM ref outside or use getElementById
-    const t = thresholdInput.value;            // your “threshold” slider (0–1)
+    const t = thresholdInput.value;
     const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = img.data;
-    const halfH = canvas.height / 2;            // top half only
+    const halfH = canvas.height / 2;
 
     for (let y = 0; y < halfH; y++) {
       for (let x = 0; x < canvas.width; x++) {
@@ -498,7 +532,6 @@ function runSelectedPath(depth = 0)  { // depth tracks recursion, max 3) {
     ctx.putImageData(img, 0, 0);
   }
 
-  /* ── Bresenham straight-shot check ── */
   const lineCells = bresenhamCells(start, goal);
   if (lineCells.every(c => !isBlocked(c.x, c.y))) {
     logDebug(`Direct Bresenham (len ${lineCells.length})`);
@@ -506,12 +539,8 @@ function runSelectedPath(depth = 0)  { // depth tracks recursion, max 3) {
     return;
   }
 
-  /* Precompute a Set for quick "on-line?" check */
-  // Consider reusing a string key generator or preallocating Set to reduce GC pressure
   const lineSet = new Set(lineCells.map(c => `${c.x},${c.y}`));
 
-  /* Base path with A* (Bresenham-biased) */
-  // PERFORMANCE: consider making `lineSet` and A* parameters reusable to reduce allocations
   const raw = astarBetween(start, goal, lineSet, {
     onFinish: path => {
       if (path) {
@@ -537,7 +566,6 @@ function runSelectedPath(depth = 0)  { // depth tracks recursion, max 3) {
   const cIt = parseInt(document.getElementById('chaikinIter').value, 10);
   const alg = document.getElementById('algorithm').value;
   let res;
-  // STRUCTURE: consider adding a `default` case to handle unexpected `alg` values
   switch (alg) {
     case 'astar_corridor_earcut':
       res = ear;
@@ -589,31 +617,25 @@ console.log('Raw path:', pathLatLngs);
 ResetPan();
 startPathPan(pathLatLngs, 50,  () => {
   if (depth + 1 < 500) {
-	applyBinaryThresholdFromSlider();
     const { x: gx, y: gy } = pickRandomWhiteGridCell();
     goal = { x: gx, y: gy };
-	
     runSelectedPath(depth + 1);
-	
   }
 });
-// Draw on Google Map as purple polyline
-if (polylinePath) polylinePath.setMap(null);  // clear previous
+if (polylinePath) polylinePath.setMap(null);
 polylinePath = new google.maps.Polyline({
   path: pathLatLngs,
   geodesic: true,
-  strokeColor: '#800080', // purple
+  strokeColor: '#800080',
   strokeOpacity: 1.0,
   strokeWeight: 4
 });
 polylinePath.setMap(map);
 
-// Start path pan animation like before
 let pathPanInterval = null;
 
-
 drawPath(res, color);
-highlightRotations(res);
+
 }
 
 function ResetPan() {
@@ -632,7 +654,7 @@ function startPathPan(initialPath, intervalMs = 100, onCycleComplete) {
   }
 
   let idx = 0;
-  const sanitized = preprocessPath(initialPath); // <-- sanitize once
+  const sanitized = preprocessPath(initialPath);
 
   if (!sanitized.length) {
     console.error("Sanitized path is empty.");
@@ -656,7 +678,7 @@ function startPathPan(initialPath, intervalMs = 100, onCycleComplete) {
       }
 
       map.panTo(point);
-      map.setZoom(25);
+      map.setZoom(20);
       idx++;
     }
 
@@ -693,7 +715,7 @@ function extractGoogleMapPixelsFromExistingCanvas() {
   const centerY = Math.floor(mapRect.height / 2);
   const [r, g, b, a] = ctx.getImageData(centerX, centerY, 1, 1).data;
 
-  console.log(`📍 Map center pixel: R=${r} G=${g} B=${b} A=${a}`);
+  console.log(`📌 Map center pixel: R=${r} G=${g} B=${b} A=${a}`);
 }
 
 function getCenterPixelColor() {
@@ -719,7 +741,7 @@ function getCenterPixelColor() {
   const centerY = Math.floor(mapRect.height / 2);
   const [r, g, b, a] = ctx.getImageData(centerX, centerY, 1, 1).data;
 
-  console.log(`📍 Map center pixel: R=${r} G=${g} B=${b} A=${a}`);
+  console.log(`📌 Map center pixel: R=${r} G=${g} B=${b} A=${a}`);
 }
 
 /* ───────────── UI bindings ───────────── */
@@ -727,7 +749,6 @@ document.getElementById('run').onclick       = runSelectedPath;
 document.getElementById('randomize').onclick = ()=>{ randomizeObstacles(); runSelectedPath(); };
 
 /* ───────────── boot ───────────── */
-    // Immediately grab the `key` param from the URL
     (function loadGoogleMaps() {
       const params = new URLSearchParams(window.location.search);
       const apiKey = params.get('key');
@@ -735,7 +756,6 @@ document.getElementById('randomize').onclick = ()=>{ randomizeObstacles(); runSe
         console.error('No Google Maps API key found in URL (use ?key=YOUR_KEY)');
         return;
       }
-      // Prevent double-loading if this runs twice
       if (document.getElementById('gmaps-script')) return;
 
       const script = document.createElement('script');
@@ -766,7 +786,6 @@ function cellToLatLng(cellX, cellY) {
   }
   const latRange = north - south;
   const lngRange = east - west;
-  // linear interpolation with fractional cell positions works fine
   const lat = north - (cellY / rows) * latRange;
   const lng = east+(-lngRange) - (cellX / cols) * -lngRange;
   if (isNaN(lat) || isNaN(lng)) {
@@ -775,10 +794,10 @@ function cellToLatLng(cellX, cellY) {
   }
   return new google.maps.LatLng(lat, lng);
 }
-//let circlePanInterval = null;
-//let circleAngle = 0;
-//const circleRadiusMeters = 200;  // radius of circle
-//const circleCenter = new google.maps.LatLng(33.7263, -116.3834); // your center
+let circlePanInterval = null;
+let circleAngle = 0;
+const circleRadiusMeters = 200;
+const circleCenter = new google.maps.LatLng(33.7263, -116.3834);
 const panButton = document.getElementById('circlePanBtn');
 const examplePath = [
   new google.maps.LatLng(33.7263, -116.3834),
@@ -786,9 +805,7 @@ const examplePath = [
   new google.maps.LatLng(33.7800, -116.3650)
 ];
 let pathIndex = 0;
-//let pathPanInterval = null;
-// Then call:
-//startPathPan(examplePath);
+let pathPanInterval = null;
 
 function isValidLatLng(point) {
   return point && (
@@ -797,8 +814,13 @@ function isValidLatLng(point) {
   );
 }
 function hideMapTiles() {
-map.setMapTypeId('roadmap');
-overlay.setOpacity(1);
+  map.setMapTypeId('roadmap');
+  if (window.canvasOverlays && window.canvasOverlays.main) {
+    const toggle = document.getElementById('overlayToggle');
+    if (toggle && toggle.checked) {
+      window.canvasOverlays.main.show();
+    }
+  }
   map.setOptions({
     styles: [
       { elementType: 'geometry', stylers: [{ visibility: 'off' }] },
@@ -810,7 +832,13 @@ overlay.setOpacity(1);
       { featureType: 'water', stylers: [{ visibility: 'off' }] }
     ]
   });
-  
+}
+function showMapTiles() {
+  map.setOptions({ styles: null });
+  map.setMapTypeId('satellite');
+  if (window.canvasOverlays && window.canvasOverlays.main) {
+    window.canvasOverlays.main.hide();
+  }
 }
 function preprocessPath(rawPath) {
   return rawPath.reduce((out, p, i) => {
@@ -826,20 +854,12 @@ function preprocessPath(rawPath) {
     return out;
   }, []);
 }
-function showMapTiles() {
-  map.setOptions({ styles: null });
-  map.setMapTypeId('satellite');
-  overlay.setOpacity(0);
-}
-// 1) Define a helper to zoom in on the current `goal`
 function zoomToGoal(zoomLevel = 18) {
-  // convert grid cell → LatLng
   const ll = cellToLatLng(goal.x, goal.y);
   if (!ll) {
     console.error('zoomToGoal: invalid goal cell', goal);
     return;
   }
-  // center the map and set zoom
   map.setCenter(ll);
   map.setZoom(zoomLevel);
 }
@@ -855,7 +875,7 @@ function startPathPan(initialPath, intervalMs = 100, onCycleComplete) {
   pathPanInterval = setInterval(() => {
     const sanitized = preprocessPath(path);
     if (!sanitized.length) {
-      console.error("No valid LatLngs in path — cannot pan.");
+      console.error("No valid LatLngs in path - cannot pan.");
       stopPathPan();
       return;
     }
@@ -883,7 +903,6 @@ function startPathPan(initialPath, intervalMs = 100, onCycleComplete) {
         try { onCycleComplete(path); }
         catch (e) { console.warn('onCycleComplete error:', e); }
       }
-      //ResetPan();  // <-- stop after full path played
     }
   }, intervalMs);
 }
@@ -894,7 +913,7 @@ function ResetPan() {
     pathPanInterval = null;
   }
 }
-//let isPanning = false;
+let isPanning = false;
 panButton.addEventListener('click', () => {
   if (isPanning) {
     ResetPan();
@@ -905,28 +924,8 @@ panButton.addEventListener('click', () => {
   }
   isPanning = !isPanning;
 });
-function highlightRotations(path, angleThreshold = 30) {
-  for (let i = 1; i < path.length - 1; i++) {
-    const a = path[i - 1], b = path[i], c = path[i + 1];
-    const angle = computeTurnAngle(a, b, c);
-
-    if (Math.abs(angle) > angleThreshold) {
-      const px = (b.x + 0.5) * gridSize;
-      const py = (b.y + 0.5) * gridSize;
-
-      ctx.beginPath();
-      ctx.arc(px, py, gridSize / 2, 0, 2 * Math.PI);
-      ctx.strokeStyle = 'red';
-      ctx.lineWidth = 3;
-      ctx.stroke();
-    }
-  }
-}
-
-function computeTurnAngle(a, b, c) {
-  const angle = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
-  return angle * (180 / Math.PI);
-}
+  let map;
+  let imageUrl = null;
 function onExportGeoJSON() {
   alert("Preparing download");
 
@@ -942,7 +941,7 @@ function onExportGeoJSON() {
     return {
       type: "Feature",
       geometry,
-      properties: {}  // Add metadata here if needed
+      properties: {}
     };
   }).filter(f => f !== null);
 
@@ -967,7 +966,6 @@ function onExportGeoJSON() {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
-// Converts Google Maps overlay shape to GeoJSON geometry object
 function convertOverlayToGeoJSON(overlay) {
   if (overlay.getPath) {
     const path = overlay.getPath().getArray().map(latlng => [latlng.lng(), latlng.lat()]);
@@ -989,20 +987,17 @@ function convertOverlayToGeoJSON(overlay) {
 
   return null;
 }
-// Convert MVCArray path to [ [lng, lat], ... ] array
 function pathToCoords(path) {
   const coords = [];
   for (let i = 0; i < path.getLength(); i++) {
     const latlng = path.getAt(i);
     coords.push([latlng.lng(), latlng.lat()]);
   }
-  // Close polygon ring if polygon
   if (path.getLength() > 0 && path.getAt(0).equals(path.getAt(path.getLength()-1)) === false) {
     coords.push(coords[0]);
   }
   return coords;
 }
-// Trigger browser download of text file
 function downloadTextFile(filename, text) {
   const blob = new Blob([text], {type: "application/json"});
   const url = URL.createObjectURL(blob);
@@ -1012,373 +1007,412 @@ function downloadTextFile(filename, text) {
   a.style.display = "none";
   document.body.appendChild(a);
   a.click();
-  document.body.removeC  draw() {
-    if (!this.div || !this.bounds) return;
-    const proj = this.getProjection();
-    const sw = proj.fromLatLngToDivPixel(this.bounds.getSouthWest());
-    const ne = proj.fromLatLngToDivPixel(this.bounds.getNorthEast());
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function toggleControls() {
+  const panel = document.getElementById('controls');
+  panel.classList.toggle('hidden');
+}
 
-    this.div.style.left = `${sw.x}px`;
-    this.div.style.top = `${ne.y}px`;
-    this.div.style.width = `${ne.x - sw.x}px`;
-    height=0;
-	this.width=0;
-	    // Defensive initializations
-    this.div = null;
-    this.img = null;
-    this.rotation = 0; // default rotation value
+// ==========================================
+// CanvasOverlay Class — reusable GroundOverlay wrapper
+// ==========================================
+class CanvasOverlay {
+  constructor(mapInstance, getBoundsFn, getOpacityFn, previewCanvasId) {
+    this.map = mapInstance;
+    this.getBounds = getBoundsFn || (() => null);
+    this.getOpacity = getOpacityFn || (() => 1.0);
+    this.groundOverlay = null;
+    this.imageUrl = null;
+    this._visible = true;
+    // Optional preview thumbnail in the slider panel
+    this.previewCanvas = previewCanvasId ? document.getElementById(previewCanvasId) : null;
+    this.previewCtx = this.previewCanvas ? this.previewCanvas.getContext('2d') : null;
   }
-  setRotationZ(deg) {
-    this.rotation = deg;
 
-    if (!this.img) {
-      console.warn('setRotationZ called before this.img was ready');
+  /** Set the image source (URL or dataUrl) — also updates preview thumbnail */
+  setSource(url) {
+    this.imageUrl = url;
+    if (!this.previewCtx || !url) return;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      this._drawPreviewImg(img);
+    };
+    img.src = url;
+  }
+
+  /** Draw an Image into the preview canvas, fitting it */
+  _drawPreviewImg(img) {
+    if (!this.previewCanvas || !this.previewCtx) return;
+    const pw = this.previewCanvas.clientWidth || 200;
+    const ph = this.previewCanvas.clientHeight || 80;
+    this.previewCanvas.width = pw;
+    this.previewCanvas.height = ph;
+    this.previewCtx.clearRect(0, 0, pw, ph);
+    const scale = Math.min(pw / img.width, ph / img.height);
+    const dw = img.width * scale;
+    const dh = img.height * scale;
+    const dx = (pw - dw) / 2;
+    const dy = (ph - dh) / 2;
+    this.previewCtx.drawImage(img, dx, dy, dw, dh);
+  }
+
+  /** Directly draw ImageData into the preview (for buffer canvases) */
+  setPreviewFromImageData(imageData) {
+    if (!this.previewCanvas || !this.previewCtx) return;
+    const tempC = document.createElement('canvas');
+    tempC.width = imageData.width;
+    tempC.height = imageData.height;
+    const tempCtx = tempC.getContext('2d');
+    tempCtx.putImageData(imageData, 0, 0);
+    this._drawPreviewImg(tempC);
+  }
+
+  /** Get current bounds from the bound-provider function */
+  _makeBounds() {
+    const b = this.getBounds();
+    if (!b) return null;
+    const sw = new google.maps.LatLng(b.south, b.west);
+    const ne = new google.maps.LatLng(b.north, b.east);
+    return new google.maps.LatLngBounds(sw, ne);
+  }
+
+  /** Show on map (creates GroundOverlay if needed, otherwise just setMap) */
+  show() {
+    this._visible = true;
+    if (!this.imageUrl) return;
+    if (this.groundOverlay) {
+      this.groundOverlay.setMap(this.map);
       return;
     }
-
-    this.img.style.transform = `rotateZ(${deg}deg)`;
+    const bounds = this._makeBounds();
+    if (!bounds) return;
+    const opacity = typeof this.getOpacity === 'function' ? this.getOpacity() : 1.0;
+    this.groundOverlay = new google.maps.GroundOverlay(this.imageUrl, bounds, {
+      opacity: opacity,
+      clickable: false
+    });
+    this.groundOverlay.setMap(this.map);
   }
-    onRemove() {
-    if (this.div) {
-      this.div.parentNode.removeChild(this.div);
-      this.div = null;
-      this.img = null;
+
+  /** Hide from map (keeps GroundOverlay instance) */
+  hide() {
+    this._visible = false;
+    if (this.groundOverlay) this.groundOverlay.setMap(null);
+  }
+
+  /** Recreate with current source/bounds/opacity (for opacity changes or image changes) */
+  update() {
+    if (!this.imageUrl) return;
+    if (this.groundOverlay) {
+      this.groundOverlay.setMap(null);
+      this.groundOverlay = null;
     }
-  }
-  onAdd() {
-  const div = document.createElement('div');
-  div.style.borderStyle = 'none';
-  div.style.borderWidth = '0px';
-  div.style.position = 'absolute';
-  div.id = 'blackOut';  
-  const img = document.createElement('img');
-  img.src = this.url;
-  img.style.width = '100%';
-  img.style.height = '100%';
-  img.style.position = 'absolute';
-  img.style.opacity = this.opacity;
-
-  div.appendChild(img);
-  this.div = div;
-  this.img = img; // ✅ Define this.img here
-
-  const panes = this.getPanes();
-  panes.overlayLayer.appendChild(div);
-}
-  
-  
-setRotation(rx = 0, ry = 0, rz = 0) {
-  this.rx = rx;   // pitch   (X)
-  this.ry = ry;   // yaw     (Y)
-  this.rz = rz;   // roll    (Z)
-
-  if (this.img) {
-    /* order matters: X → Y → Z keeps intuition - change if you need */
-    this.img.style.transform =
-      `rotateX(${this.rx}deg); rotateY(${this.ry}deg); rotateZ(${this.rz}deg);`;
+    if (this._visible) this.show();
   }
 }
-  // ← New!
-  setOpacity(opacity) {
-    this.opacity = opacity;
-    if (this.img) {
-      this.img.style.opacity = opacity;
-    }
+
+// ---- Create overlay instances ----
+window.canvasOverlays = {};
+const BOUNDS_CACHE = { south: 0, west: 0, north: 0, east: 0 };
+
+function readBoundsFromUI() {
+  const s = parseFloat(document.getElementById('south').value);
+  const w = parseFloat(document.getElementById('west').value);
+  const n = parseFloat(document.getElementById('north').value);
+  const e = parseFloat(document.getElementById('east').value);
+  if ([s, w, n, e].some(isNaN)) return null;
+  BOUNDS_CACHE.south = s;
+  BOUNDS_CACHE.west = w;
+  BOUNDS_CACHE.north = n;
+  BOUNDS_CACHE.east = e;
+  return BOUNDS_CACHE;
+}
+
+const boundsFn = () => readBoundsFromUI();
+
+// Layer 1: Uploaded Image Overlay (uses imageUrl dataUrl)
+const imgOverlay = new CanvasOverlay(null, boundsFn, () =>
+  parseFloat(document.getElementById('overlayOpacity').value) || 1.0,
+  'overlayPreview'
+);
+window.canvasOverlays.main = imgOverlay;
+
+function updateOverlay() {
+  if (!imageUrl) return;
+  imgOverlay.setSource(imageUrl);
+  imgOverlay.update();
+}
+
+window.updateOverlayOpacity = function() {
+  const slider = document.getElementById('overlayOpacity');
+  const valueDisplay = document.getElementById('overlayOpacityValue');
+  const toggle = document.getElementById('overlayToggle');
+  const value = parseFloat(slider.value);
+  valueDisplay.textContent = value.toFixed(2);
+  if (!toggle.checked || !imageUrl) return;
+  imgOverlay.update();
+};
+
+window.toggleOverlayLayer = function() {
+  const toggle = document.getElementById('overlayToggle');
+  if (toggle.checked) {
+    imgOverlay.show();
+  } else {
+    imgOverlay.hide();
   }
-/* keep your legacy single-axis call */
-  setAngle(a){ this.setRotation(20,45,a % 360); }
-onAdd() {
-  // 1) create holder DIV
-  this.holder = document.createElement('div');
-  this.holder.id = 'blackOut';            // ← give it an ID
-  Object.assign(this.holder.style, {
-    position: 'absolute',
-    overflow: 'hidden',
-    willChange: 'transform',
-    top: '0',
-    left: '0',
-    width: '100%',
-    height: '100%'
+};
+
+// Layer 2: Trace/Path Layer
+window.toggleTraceLayer = function() {
+  const toggle = document.getElementById('traceToggle');
+  if (toggle.checked) {
+    runSelectedPath();
+  } else {
+    drawGrid();
+    drawObs();
+    drawPoints();
+  }
+};
+
+window.updateTraceOpacity = function() {
+  const slider = document.getElementById('traceOpacity');
+  const valueDisplay = document.getElementById('traceOpacityValue');
+  const value = parseFloat(slider.value);
+  valueDisplay.textContent = value.toFixed(2);
+  window.traceOpacity = value;
+  runSelectedPath();
+};
+
+// Layer 3: Binary Map Layer
+// Clean buffer canvas (never touched by grid/paths) — single source for GroundOverlay
+window.binaryBufferCanvas = document.createElement('canvas');
+window.binaryBufferCanvas.id = 'binaryBufferCanvas';
+window.binaryBufferCanvas.style.display = 'none';
+document.body.appendChild(window.binaryBufferCanvas);
+window.binaryBufferCtx = window.binaryBufferCanvas.getContext('2d');
+
+const binOverlay = new CanvasOverlay(null, boundsFn, () =>
+  parseFloat(document.getElementById('binaryOpacity').value) || 1.0,
+  'binaryPreview'
+);
+window.canvasOverlays.binary = binOverlay;
+
+function pushBinaryToMapOverlay() {
+  const toggle = document.getElementById('binaryToggle');
+  if (!toggle || !toggle.checked) {
+    binOverlay.hide();
+    return;
+  }
+  // Source is always the clean buffer (never has grid/paths)
+  binOverlay.setSource(window.binaryBufferCanvas.toDataURL('image/png'));
+  binOverlay.show();
+}
+
+window.toggleBinaryLayer = function() {
+  const toggle = document.getElementById('binaryToggle');
+  const opacitySlider = document.getElementById('binaryOpacity');
+  if (toggle.checked) {
+    window.binaryLayerVisible = true;
+    window.binaryLayerOpacity = parseFloat(opacitySlider.value);
+    if (window.originalImageData) pushBinaryToMapOverlay();
+  } else {
+    window.binaryLayerVisible = false;
+    binOverlay.hide();
+  }
+};
+
+window.updateBinaryOpacity = function() {
+  const slider = document.getElementById('binaryOpacity');
+  const valueDisplay = document.getElementById('binaryOpacityValue');
+  const toggle = document.getElementById('binaryToggle');
+  const value = parseFloat(slider.value);
+  valueDisplay.textContent = value.toFixed(2);
+  window.binaryLayerOpacity = value;
+  if (toggle.checked && window.originalImageData) {
+    binOverlay.update();
+  }
+};
+
+// Layer 4: Inverted Binary Map Layer (white=transparent, black=visible)
+window.invertedBinaryBufferCanvas = document.createElement('canvas');
+window.invertedBinaryBufferCanvas.id = 'invertedBinaryBufferCanvas';
+window.invertedBinaryBufferCanvas.style.display = 'none';
+document.body.appendChild(window.invertedBinaryBufferCanvas);
+window.invertedBinaryBufferCtx = window.invertedBinaryBufferCanvas.getContext('2d');
+
+const invBinOverlay = new CanvasOverlay(null, boundsFn, () =>
+  parseFloat(document.getElementById('invertedBinaryOpacity').value) || 1.0,
+  'invertedBinaryPreview'
+);
+window.canvasOverlays.invertedBinary = invBinOverlay;
+
+function pushInvertedBinaryToMapOverlay() {
+  const toggle = document.getElementById('invertedBinaryToggle');
+  if (!toggle || !toggle.checked) {
+    invBinOverlay.hide();
+    return;
+  }
+  invBinOverlay.setSource(window.invertedBinaryBufferCanvas.toDataURL('image/png'));
+  invBinOverlay.show();
+}
+
+window.toggleInvertedBinaryLayer = function() {
+  const toggle = document.getElementById('invertedBinaryToggle');
+  const opacitySlider = document.getElementById('invertedBinaryOpacity');
+  if (toggle.checked) {
+    window.invertedBinaryLayerVisible = true;
+    window.invertedBinaryLayerOpacity = parseFloat(opacitySlider.value);
+    if (window.originalImageData) pushInvertedBinaryToMapOverlay();
+  } else {
+    window.invertedBinaryLayerVisible = false;
+    invBinOverlay.hide();
+  }
+};
+
+window.updateInvertedBinaryOpacity = function() {
+  const slider = document.getElementById('invertedBinaryOpacity');
+  const valueDisplay = document.getElementById('invertedBinaryOpacityValue');
+  const toggle = document.getElementById('invertedBinaryToggle');
+  const value = parseFloat(slider.value);
+  valueDisplay.textContent = value.toFixed(2);
+  window.invertedBinaryLayerOpacity = value;
+  if (toggle.checked && window.originalImageData) {
+    invBinOverlay.update();
+  }
+};
+
+// ---- initMap and setup ----
+function initMap() {
+  map = new google.maps.Map(document.getElementById("map"), {
+    center: { lat: 33.7263, lng: -116.3834 },
+    zoom: 15,
+    mapTypeId: "satellite"
   });
 
-  // 2) create image
-  this.img = document.createElement('img');
-  this.img.src = this.url;
-  Object.assign(this.img.style, {
-    position: 'absolute',
-    top: 0, left: 0,
-    width: '100%', height: '100%',
-    opacity: this.opacity,
-    transformOrigin: 'center center'
-  });
+  // Wire up CanvasOverlay instances to the actual map
+  imgOverlay.map = map;
+  binOverlay.map = map;
+  invBinOverlay.map = map;
 
-  this.holder.appendChild(this.img);
+  randomizeObstacles(); runSelectedPath();
 
-  // 3) add to the correct pane
-  this.getPanes().overlayLayer.appendChild(this.holder);
-
-draw() {
-	const proj = this.getProjection();
-	const sw = proj.fromLatLngToDivPixel(this.bounds.getSouthWest());
-	const ne = proj.fromLatLngToDivPixel(this.bounds.getNorthEast());
-	const angle = parseInt(map.getHeading() ?? 0, 10);
-	this.holder.style.opacity= this.opacity;
-  if (angle === 0) {
-    this.holder.style.left   = `${sw.x}px`;
-    this.holder.style.top    = `${ne.y}px`;
-    this.holder.style.width  = `${ne.x - sw.x}px`;
-    this.holder.style.height = `${sw.y - ne.y}px`;
-	this.height=sw.y - ne.y;
-	this.width=ne.x - sw.x;
-	this.holder.style.transform = `rotate(${angle}deg)`;
-  } else if (angle === 90) {//know bug
-	//dontrender//errors prevent the view angle
-	this.holder.style.height =this.holder.style.width;
-	this.holder.style.width  =10;
-  } else if (angle === 180) {
-  	this.height=  ne.y-sw.y;
-	this.width= sw.x-ne.x;
-    this.holder.style.left   = `${ne.x}px`;
-    this.holder.style.top    = `${sw.y}px`;
-    this.holder.style.width  = `${this.width}px`;
-    this.holder.style.height = `${this.height}px`;
-	this.holder.style.transform = `rotate(${angle}deg)`;
-	//this.holder.style.transform = 'scaleX(-1)';
-  } else if (angle === 270) {//know bug
-     //dontrender//errors prevent the view angle
-	 this.holder.style.width  =10;
-	 this.holder.style.height =10;
-  }
+  setupDrawing();
+  setupUI();
 }
-  onRemove() { this.holder.remove(); }
 
-}
-  function initMap() {
-    map = new google.maps.Map(document.getElementById("map"), {
-      center: { lat: 33.7263, lng: -116.3834 },
-      zoom: 15,
-      mapTypeId: "satellite"
-    });
-	
-	randomizeObstacles(); runSelectedPath();
-
-    setup// Define overlay class after Maps API is ready
-    class FlatRotatingOverlay extends google.maps.OverlayView {
-      constructor(url, bounds, opacity = 1) {
-        super();
-        this.url = url;
-        this.bounds = bounds;
-        this.opacity = opacity;
-      }
-      onAdd() {
-        this.holder = document.createElement('div');
-        Object.assign(this.holder.style, {
-          position: 'absolute', overflow: 'hidden', willChange: 'transform'
-        });
-        this.img = document.createElement('img');
-        this.img.src = this.url;
-        Object.assign(this.img.style, {
-          position: 'absolute', top: 0, left: 0,
-          width: '100%', height: '100%',
-          transformOrigin: 'center center', opacity: this.opacity
-        });
-        this.holder.appendChild(this.img);
-        this.getPanes().mapPane.appendChild(this.holder);
-      }
-      draw() {
-        const proj = this.getProjection();
-        const sw = proj.fromLatLngToDivPixel(this.bounds.getSouthWest());
-        const ne = proj.fromLatLngToDivPixel(this.bounds.getNorthEast());
-        Object.assign(this.holder.style, {
-          left: `${sw.x}px`,
-          top: `${ne.y}px`,
-          width: `${ne.x - sw.x}px`,
-          height: `${sw.y - ne.y}px`
-        });
-      }
-      onRemove() {
-        this.holder.remove();
-      }
-      setOpacity(o) {
-        this.opacity = o;
-        if (this.img) this.img.style.opacity = o;
-      }
-      setRotationZ(deg) {
-        if (!this.img) return;
-        this.img.style.transform = `rotateZ(${deg}deg)`;
-      }
-    }
-
-    Drawing();
-    setupUI();
-
-	
-  }
-  
-  //var drawnShapes=[];
-  function setupDrawing() {
-    drawingManager = new google.maps.drawing.DrawingManager({
-      drawingMode: null,
-      drawingControl: false,
-      polygonOptions: { editable: true },
-      polylineOptions: { editable: true },
-      rectangleOptions: { editable: true },
-      circleOptions: { editable: true }
-    });
-    drawingManager.setMap(map);
-    google.maps.event.addListener(drawingManager, 'overlaycomplete', e => {
-      drawnShapes.push(e.overlay);
-      e.overlay.setEditable(true);
-      drawingManager.setDrawingMode(null);
-      document.getElementById('toggle-draw').textContent = 'Start Drawing';
-    });
-  }
-
-  function setupUI() {
-    const fileInput = document.getElementById('imageLoader');
-    const southIn = document.getElementById('south');
-    const westIn = document.getElementById('west');
-    const northIn = document.getElementById('north');
-    const eastIn = document.getElementById('east');
-    const opacityR = document.getElementById('opacity');
-    fileInput.addEventListener('change', onFileChange);
-    document.getElementById('toggle-draw').addEventListener('click', onToggleDraw);
-    document.getElementById('export-geojson').addEventListener('click', onExportGeoJSON);
-    document.getElementById('export-png').addEventListener('click', onExportPNG);
-    opacityR.addEventListener('input', () => {
-     // if (overlay) overlay.setOpacity(parseFloat(opacityR.value));
-    });
-    [southIn, westIn, northIn, eastIn].forEach(input =>
-      input.addEventListener('input', updateOverlay)
-    );
-    function onFileChange(evt) {
-	//alert("yo");
-      const file = evt.target.files[0];
-      if (!file || !file.type.includes('png')) return;
-      const reader = new FileReader();
-      reader.onload = e => {
-        imageUrl = e.target.result;
-        updateOverlay();
-
-      };
-      reader.readAsDataURL(file);
-
-    }
-    function onToggleDraw(e) {
-      const mode = drawingManager.getDrawingMode()
-        ? null
-        : google.maps.drawing.OverlayType.POLYLINE;
-      drawingManager.setDrawingMode(mode);
-      e.target.textContent = mode ? 'Stop Drawing' : 'Start Drawing';
-    }
-
-    function onExportPNG() {
-      html2canvas(document.getElementById('map'), { useCORS: true }).then(canvas => {
-        const a = document.createElement('a');
-        a.href = canvas.toDataURL();
-        a.download = 'map-snapshot.png';
-        a.click();
-      });
-    }
-	
-	  }
- 
-	  function updateOverlay() {
-    if (!imageUrl) return;
-
-    const s = parseFloat(document.getElementById('south').value);
-    const w = parseFloat(document.getElementById('west').value);
-    const n = parseFloat(document.getElementById('north').value);
-    const e = parseFloat(document.getElementById('east').value);
-    const o = parseFloat(document.getElementById('opacity').value);
-    if ([s, w, n, e].some(isNaN)) return;
-
-    const sw = new google.maps.LatLng(s, w);
-    const ne = new google.maps.LatLng(n, e);
-    const bounds = new google.maps.LatLngBounds(sw, ne);
-
-    if (overlay) overlay.setMap(null);
-    overlay = new FlatRotatingOverlay(imageUrl, bounds, o );
-    overlay.setMap(map);
-	overlay.setRotationZ(30);
-  }
-
-  findow.onload = initMap;
-
- else {
-      // Hide overlay
-      if (overlay) {
-        overlay.setMap(null);
-        overlay = null;
-      }
-      console.log('Canvas overlay hidden');
-    }
-  }
-
-  window.onload = initMap;
-
-
-
-  function populateBbox(w, s, e, n) {
-    document.getElementById('west').value = w;
-    document.getElementById('south').value = s;
-    document.getElementById('east').value = e;
-    document.getElementById('north').value = n;
-    updateOverlay();
-  }
-
-  function parseBboxFromFilename(filename) {
-    const match = filename.match(/w(-?\d+_\d+)_s(-?\d+_\d+)_e(-?\d+_\d+)_n(-?\d+_\d+)/i);
-    if (!match) return;
-
-    // Convert underscore back to decimal
-    const [_, w, s, e, n] = match;
-    const bbox = [w, s, e, n].map(v => parseFloat(v.replace("_", ".")));
-    if (bbox.every(v => !isNaN(v))) {
-      populateBbox(...bbox);
-    }
-  }
-
-  function readPNGTextChunk(arrayBuffer) {
-    const data = new DataView(arrayBuffer);
-    let offset = 8; // skip PNG header
-
-    while (offset < data.byteLength) {
-      const length = data.getUint32(offset); offset += 4;
-      const type = String.fromCharCode(
-        data.getUint8(offset), data.getUint8(offset + 1),
-        data.getUint8(offset + 2), data.getUint8(offset + 3)
-      );
-      offset += 4;
-
-      if (type === 'tEXt') {
-        const chunk = new Uint8Array(arrayBuffer, offset, length);
-        const text = new TextDecoder().decode(chunk);
-        if (text.startsWith('bbox=')) {
-          parseBoundingBoxText(text.slice(5));
-        } else if (text.startsWith('bbox:')) {
-          parseBoundingBoxText(text.slice(5));
-        }
-      }
-
-      offset += length + 4; // skip CRC
-    }
-  }
-
-  function parseBoundingBoxText(text) {
-    const match = text.match(/south=([-\d.]+)\s+west=([-\d.]+)\s+north=([-\d.]+)\s+east=([-\d.]+)/);
-    if (match) {
-      const [_, s, w, n, e] = match.map(Number);
-      populateBbox(w, s, e, n);
-    }
-  }
-
-
-
-  document.getElementById('opacity').addEventListener('input', () => {
-    if (overlay) overlay.setOpacity(parseFloat(document.getElementById('opacity').value));
+var drawnShapes=[];
+function setupDrawing() {
+  drawingManager = new google.maps.drawing.DrawingManager({
+    drawingMode: null,
+    drawingControl: false,
+    polygonOptions: { editable: true },
+    polylineOptions: { editable: true },
+    rectangleOptions: { editable: true },
+    circleOptions: { editable: true }
   });
+  drawingManager.setMap(map);
+  google.maps.event.addListener(drawingManager, 'overlaycomplete', e => {
+    drawnShapes.push(e.overlay);
+    e.overlay.setEditable(true);
+    drawingManager.setDrawingMode(null);
+    document.getElementById('toggle-draw').textContent = 'Start Drawing';
+  });
+}
 
-  ['south', 'west', 'north', 'east'].forEach(id =>
-    document.getElementById(id).addEventListener('input', updateOverlay)
+function setupUI() {
+  const fileInput = document.getElementById('imageLoader');
+  const southIn = document.getElementById('south');
+  const westIn = document.getElementById('west');
+  const northIn = document.getElementById('north');
+  const eastIn = document.getElementById('east');
+  fileInput.addEventListener('change', onFileChange);
+  document.getElementById('toggle-draw').addEventListener('click', onToggleDraw);
+  document.getElementById('export-geojson').addEventListener('click', onExportGeoJSON);
+  document.getElementById('export-png').addEventListener('click', onExportPNG);
+  [southIn, westIn, northIn, eastIn].forEach(input =>
+    input.addEventListener('input', updateOverlay)
   );
+  function onFileChange(evt) {
+    const file = evt.target.files[0];
+    if (!file || !file.type.includes('png')) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      imageUrl = e.target.result;
+      updateOverlay();
+    };
+    reader.readAsDataURL(file);
+  }
+  function onToggleDraw(e) {
+    const mode = drawingManager.getDrawingMode()
+      ? null
+      : google.maps.drawing.OverlayType.POLYLINE;
+    drawingManager.setDrawingMode(mode);
+    e.target.textContent = mode ? 'Stop Drawing' : 'Start Drawing';
+  }
+  function onExportPNG() {
+    html2canvas(document.getElementById('map'), { useCORS: true }).then(canvas => {
+      const a = document.createElement('a');
+      a.href = canvas.toDataURL();
+      a.download = 'map-snapshot.png';
+      a.click();
+    });
+  }
+}
+
+window.onload = initMap;
+
+function populateBbox(w, s, e, n) {
+  document.getElementById('west').value = w;
+  document.getElementById('south').value = s;
+  document.getElementById('east').value = e;
+  document.getElementById('north').value = n;
+  updateOverlay();
+}
+
+function parseBboxFromFilename(filename) {
+  const match = filename.match(/w(-?\d+_\d+)_s(-?\d+_\d+)_e(-?\d+_\d+)_n(-?\d+_\d+)/i);
+  if (!match) return;
+
+  const [_, w, s, e, n] = match;
+  const bbox = [w, s, e, n].map(v => parseFloat(v.replace("_", ".")));
+  if (bbox.every(v => !isNaN(v))) {
+    populateBbox(...bbox);
+  }
+}
+
+function readPNGTextChunk(arrayBuffer) {
+  const data = new DataView(arrayBuffer);
+  let offset = 8;
+
+  while (offset < data.byteLength) {
+    const length = data.getUint32(offset); offset += 4;
+    const type = String.fromCharCode(
+      data.getUint8(offset), data.getUint8(offset + 1),
+      data.getUint8(offset + 2), data.getUint8(offset + 3)
+    );
+    offset += 4;
+
+    if (type === 'tEXt') {
+      const chunk = new Uint8Array(arrayBuffer, offset, length);
+      const text = new TextDecoder().decode(chunk);
+      if (text.startsWith('bbox=')) {
+        parseBoundingBoxText(text.slice(5));
+      } else if (text.startsWith('bbox:')) {
+        parseBoundingBoxText(text.slice(5));
+      }
+    }
+
+    offset += length + 4;
+  }
+}
+
+function parseBoundingBoxText(text) {
+  const match = text.match(/south=([-\d.]+)\s+west=([-\d.]+)\s+north=([-\d.]+)\s+east=([-\d.]+)/);
+  if (match) {
+    const [_, s, w, n, e] = match.map(Number);
+    populateBbox(w, s, e, n);
+  }
+}

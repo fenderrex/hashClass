@@ -1012,16 +1012,20 @@ function downloadTextFile(filename, text) {
   a.style.display = "none";
   document.body.appendChild(a);
   a.click();
-  document.body.removeC  draw() {
-    if (!this.div || !this.bounds) return;
-    const proj = this.getProjection();
-    const sw = proj.fromLatLngToDivPixel(this.bounds.getSouthWest());
-    const ne = proj.fromLatLngToDivPixel(this.bounds.getNorthEast());
-
-    this.div.style.left = `${sw.x}px`;
-    this.div.style.top = `${ne.y}px`;
-    this.div.style.width = `${ne.x - sw.x}px`;
-    height=0;
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function toggleControls() {
+  const panel = document.getElementById('controls');
+  panel.classList.toggle('hidden');
+}
+class FlatRotatingOverlay extends google.maps.OverlayView {
+  constructor(url, bounds, opacity = 0.7) {
+    super();
+    this.url = url;
+    this.bounds = bounds;
+    this.opacity = opacity;
+    this.height=0;
 	this.width=0;
 	    // Defensive initializations
     this.div = null;
@@ -1116,6 +1120,8 @@ onAdd() {
 
   // 3) add to the correct pane
   this.getPanes().overlayLayer.appendChild(this.holder);
+}
+
 
 draw() {
 	const proj = this.getProjection();
@@ -1162,7 +1168,7 @@ draw() {
 	
 	randomizeObstacles(); runSelectedPath();
 
-    setup// Define overlay class after Maps API is ready
+    // Define overlay class after Maps API is ready
     class FlatRotatingOverlay extends google.maps.OverlayView {
       constructor(url, bounds, opacity = 1) {
         super();
@@ -1209,7 +1215,7 @@ draw() {
       }
     }
 
-    Drawing();
+    setupDrawing();
     setupUI();
 
 	
@@ -1301,18 +1307,6 @@ draw() {
     overlay = new FlatRotatingOverlay(imageUrl, bounds, o );
     overlay.setMap(map);
 	overlay.setRotationZ(30);
-  }
-
-  findow.onload = initMap;
-
- else {
-      // Hide overlay
-      if (overlay) {
-        overlay.setMap(null);
-        overlay = null;
-      }
-      console.log('Canvas overlay hidden');
-    }
   }
 
   window.onload = initMap;

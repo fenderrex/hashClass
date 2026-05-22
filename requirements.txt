@@ -1,0 +1,7 @@
+pillow
+opencv-python
+opencv-contrib-python
+pygame
+PyOpenGL
+numpy
+mapbox-earcut

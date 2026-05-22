@@ -24,6 +24,45 @@
 <body>
   <div id="controls">
     <label>Load OSM: <input id="osmFile" type="file" accept=".osm,.xml" /></label>
+    <div id="bboxDisplay" style="margin-top:8px; font-size:13px;">No bbox loaded</div>
+    <div id="osmBoundsDisplay" style="margin-top:4px; font-size:11px; color:#666;"></div>
+    <div id="bboxDiffDisplay" style="margin-top:4px; font-size:11px; color:#999; white-space:pre-wrap;"></div>
+    <button id="downloadBbox" disabled style="margin-top:6px">Download BBOX</button>
+    <label style="margin-top:6px">Filename Mode:
+      <select id="filenameMode">
+        <option value="minmax">Min / Max (default)</option>
+        <option value="shift_half">Shift by Half-Width/Height</option>
+        <option value="shift_full">Shift by Full-Width/Height</option>
+        <option value="centered">Centered (cx/cy + half-width/half-height)</option>
+      </select>
+    </label>
+    <label style="margin-top:6px">Axis Mode:
+      <select id="axisMode">
+        <option value="both">Both (lat & lon)</option>
+        <option value="north-south">North–South (lat)</option>
+        <option value="west-east">West–East (lon)</option>
+      </select>
+    </label>
+    <label style="margin-top:6px">Manual Inputs (name-only):
+      <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
+        <div style="display:flex;gap:6px">
+          <input id="manualLat" type="number" step="0.000001" value="0" style="width:110px" placeholder="lat offset (deg)">
+          <input id="manualLon" type="number" step="0.000001" value="0" style="width:110px" placeholder="lon offset (deg)">
+        </div>
+        <div style="font-size:12px;color:#444">Or enter exact bbox values (deg):</div>
+        <div style="display:flex;gap:6px">
+          <input id="manualSouth" type="number" step="0.000001" value="0" style="width:110px" placeholder="south (minLat)">
+          <input id="manualWest"  type="number" step="0.000001" value="0" style="width:110px" placeholder="west (minLon)">
+        </div>
+        <div style="display:flex;gap:6px">
+          <input id="manualNorth" type="number" step="0.000001" value="0" style="width:110px" placeholder="north (maxLat)">
+          <input id="manualEast"  type="number" step="0.000001" value="0" style="width:110px" placeholder="east (maxLon)">
+        </div>
+      </div>
+      <label style="display:block;margin-top:6px"><input id="useManualOffset" type="checkbox"> Apply manual lat/lon offsets to exported filename (name-only)</label>
+      <label style="display:block;margin-top:6px"><input id="useManualBBox" type="checkbox"> Use manual bbox values for exported filename (name-only)</label>
+      <div id="manualOffsetDisplay" style="font-size:12px;margin-top:6px;white-space:pre-wrap;color:#333"></div>
+    </label>
     <label>Subdivisions: <input id="subdivisions" type="number" min="0" max="20" value="0" /></label>
     <label><input id="binary" type="checkbox" /> Binary Mask</label>
     <div id="typeControls"></div>
@@ -87,13 +126,6 @@
     function parseOSM(text) {
       const doc = new DOMParser().parseFromString(text,'application/xml');
       const b = doc.querySelector('bounds');
-      if (!b) return [];
-      bbox = {
-        minLat: parseFloat(b.getAttribute('minlat')),
-        maxLat: parseFloat(b.getAttribute('maxlat')),
-        minLon: parseFloat(b.getAttribute('minlon')),
-        maxLon: parseFloat(b.getAttribute('maxlon'))
-      };
 
       const nodesMap = {};
       doc.querySelectorAll('node').forEach(n => {
@@ -127,6 +159,60 @@
           type
         });
       });
+
+      // Get original bounds from OSM <bounds> element if present
+      let osmBounds = null;
+      if (b) {
+        osmBounds = {
+          minLat: parseFloat(b.getAttribute('minlat')),
+          maxLat: parseFloat(b.getAttribute('maxlat')),
+          minLon: parseFloat(b.getAttribute('minlon')),
+          maxLon: parseFloat(b.getAttribute('maxlon'))
+        };
+        console.log('OSM <bounds> element:', osmBounds);
+      }
+
+      // Recompute bbox from the actual nodes used by rendered ways.
+      if (ways.length > 0) {
+        let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+        let nodeCount = 0;
+        ways.forEach(w => {
+          w.nodes.forEach(n => {
+            if (!isFinite(n.lat) || !isFinite(n.lon)) return;
+            nodeCount++;
+            if (n.lat < minLat) minLat = n.lat;
+            if (n.lat > maxLat) maxLat = n.lat;
+            if (n.lon < minLon) minLon = n.lon;
+            if (n.lon > maxLon) maxLon = n.lon;
+          });
+        });
+        console.log(`Processed ${nodeCount} nodes from ${ways.length} ways`);
+        if (minLat !== Infinity) {
+          bbox = { minLat, maxLat, minLon, maxLon };
+          console.log('Calculated bbox from nodes:', bbox);
+        }
+      }
+
+      // If that computation failed, fall back to <bounds> if present.
+      if (!bbox && osmBounds) {
+        console.warn('Node-based bbox calculation failed, using OSM <bounds> fallback');
+        bbox = osmBounds;
+      }
+
+      // Log comparison if both are available
+      if (bbox && osmBounds) {
+        const diff = {
+          minLatDiff: bbox.minLat - osmBounds.minLat,
+          maxLatDiff: bbox.maxLat - osmBounds.maxLat,
+          minLonDiff: bbox.minLon - osmBounds.minLon,
+          maxLonDiff: bbox.maxLon - osmBounds.maxLon
+        };
+        console.log('Difference (calculated - OSM bounds):', diff);
+        if (Math.abs(diff.minLatDiff) > 0.0001 || Math.abs(diff.maxLatDiff) > 0.0001 ||
+            Math.abs(diff.minLonDiff) > 0.0001 || Math.abs(diff.maxLonDiff) > 0.0001) {
+          console.warn('Significant difference between calculated bbox and OSM <bounds>!');
+        }
+      }
 
       return ways;
     }
@@ -180,6 +266,7 @@
       const reader = new FileReader();
       reader.onload = () => {
         roads = parseOSM(reader.result);
+        updateBBoxUI();
         setupTypeControls();
         exportBtn.disabled = false;
         draw();
@@ -268,6 +355,34 @@
       }
     }
 
+    function updateBBoxUI() {
+      const el = document.getElementById('bboxDisplay');
+      const btn = document.getElementById('downloadBbox');
+      if (!bbox) {
+        el.textContent = 'No bbox loaded';
+        btn.disabled = true;
+        return;
+      }
+      const s = bbox.minLat, w = bbox.minLon, n = bbox.maxLat, e = bbox.maxLon;
+      el.textContent = `BBox → south=${s} west=${w} north=${n} east=${e}`;
+      btn.disabled = false;
+      console.log('Parsed OSM bbox:', { south: s, west: w, north: n, east: e });
+    }
+
+    document.getElementById('downloadBbox').addEventListener('click', () => {
+      if (!bbox) return;
+      const s = bbox.minLat, w = bbox.minLon, n = bbox.maxLat, e = bbox.maxLon;
+      const text = `south=${s}\nwest=${w}\nnorth=${n}\neast=${e}`;
+      const blob = new Blob([text], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'bbox.txt';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+    });
+
     function draw() {
       const w = canvas.width, h = canvas.height;
       const buf = document.createElement('canvas');
@@ -292,8 +407,11 @@
         ctxMain.clearRect(0,0,w,h);
         ctxMain.putImageData(img,0,0);
       } else {
-        ctxMain.clearRect(0,0,w,h);
-        ctxMain.drawImage(buf,0,0);
+        ctxMain.save();
+        ctxMain.setTransform(1, 0, 0, 1, 0, 0);
+        ctxMain.clearRect(0, 0, w, h);
+        ctxMain.drawImage(buf, 0, 0);
+        ctxMain.restore();
       }
     }
 
@@ -330,21 +448,266 @@
         bigCtx.putImageData(img,0,0);
       }
 
-      bigC.toBlob(blob => {
-        const fmt   = v => v.toFixed(6).replace(/\./g,'_');
-        const epoch = Math.floor(Date.now()/1000);
-        const { minLon, minLat, maxLon, maxLat } = bbox;
-        const name = `overlay_t${epoch}`
-                   + `_w${fmt(minLon)}_s${fmt(minLat)}`
-                   + `_e${fmt(maxLon)}_n${fmt(maxLat)}.png`;
+      // ---------- BBOX vars (exposed for custom filename logic) ----------
+      // these will be populated from the parsed OSM `bbox` object or adjusted
+      let southVal, westVal, northVal, eastVal;
+      // For centered mode
+      let centerLatVal, centerLonVal, halfLatVal, halfLonVal;
+      // export timestamp (Date) exposed for filename/time logic
+      let exportTimestamp = null;
+      function setExportTimestamp() { exportTimestamp = new Date(); }
+      function formatTimeForFilename(d) { return d.toISOString().replace(/[:.]/g,'_'); }
 
-        const a = document.createElement('a');
-        a.href     = URL.createObjectURL(blob);
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(a.href);
+      // Compute the bbox vars according to filename mode only (no drawing changes)
+      function setBBoxVarsFromBBox() {
+        if (!bbox) return false;
+        const modeEl = document.getElementById('filenameMode');
+        const mode = modeEl ? modeEl.value : 'minmax';
+
+        const minLat = bbox.minLat, maxLat = bbox.maxLat, minLon = bbox.minLon, maxLon = bbox.maxLon;
+        const dy = maxLat - minLat;
+        const dx = maxLon - minLon;
+
+        if (mode === 'minmax') {
+          southVal = minLat;
+          westVal  = minLon;
+          northVal = maxLat;
+          eastVal  = maxLon;
+          return true;
+        }
+
+        if (mode === 'shift_half') {
+          // shift min/max by half the width/height (deg) — useful if encoder expects tile origin at corner
+          const halfLat = dy/2;
+          const halfLon = dx/2;
+          southVal = minLat - halfLat;
+          northVal = maxLat - halfLat;
+          westVal  = minLon - halfLon;
+          eastVal  = maxLon - halfLon;
+          return true;
+        }
+
+        if (mode === 'centered') {
+          centerLatVal = (minLat + maxLat)/2;
+          centerLonVal = (minLon + maxLon)/2;
+          halfLatVal = dy/2;
+          halfLonVal = dx/2;
+          // also fill min/max for fallback / compatibility
+          southVal = centerLatVal - halfLatVal;
+          northVal = centerLatVal + halfLatVal;
+          westVal  = centerLonVal - halfLonVal;
+          eastVal  = centerLonVal + halfLonVal;
+          return true;
+        }
+
+        // default fallback
+        southVal = minLat;
+        westVal  = minLon;
+        northVal = maxLat;
+        eastVal  = maxLon;
+        return true;
+      }
+
+      // ---------- Manual offset helpers & UI update ----------
+      function getManualInputs() {
+        const lat = parseFloat(document.getElementById('manualLat').value) || 0;
+        const lon = parseFloat(document.getElementById('manualLon').value) || 0;
+        const useOffset = !!document.getElementById('useManualOffset').checked;
+        const useBBox = !!document.getElementById('useManualBBox').checked;
+        const s = parseFloat(document.getElementById('manualSouth').value);
+        const w = parseFloat(document.getElementById('manualWest').value);
+        const n = parseFloat(document.getElementById('manualNorth').value);
+        const e = parseFloat(document.getElementById('manualEast').value);
+        return { lat, lon, useOffset, useBBox, s, w, n, e };
+      }
+
+      function applyManualOffsets(w, s, e, n) {
+        const m = getManualInputs();
+        if (m.useBBox && isFinite(m.w) && isFinite(m.s) && isFinite(m.e) && isFinite(m.n)) {
+          return { w: m.w, s: m.s, e: m.e, n: m.n };
+        }
+        if (m.useOffset) {
+          return {
+            w: w + m.lon,
+            e: e + m.lon,
+            s: s + m.lat,
+            n: n + m.lat
+          };
+        }
+        return { w, s, e, n };
+      }
+
+      function updateManualDisplay() {
+        const disp = document.getElementById('manualOffsetDisplay');
+        if (!bbox) { disp.textContent = 'No bbox loaded'; return; }
+        
+        const minLat = bbox.minLat, maxLat = bbox.maxLat, minLon = bbox.minLon, maxLon = bbox.maxLon;
+        const dy = maxLat - minLat, dx = maxLon - minLon;
+        
+        // Show raw bbox values for validation
+        const rawInfo = `Raw bbox from nodes:\n` +
+          `  minLat(south)=${minLat.toFixed(6)} maxLat(north)=${maxLat.toFixed(6)}\n` +
+          `  minLon(west)=${minLon.toFixed(6)} maxLon(east)=${maxLon.toFixed(6)}\n` +
+          `  span: lat=${dy.toFixed(6)} lon=${dx.toFixed(6)}\n`;
+        
+        // compute base filename bbox using current mode
+        const modeEl = document.getElementById('filenameMode');
+        const mode = modeEl ? modeEl.value : 'minmax';
+        let base = { s: minLat, w: minLon, n: maxLat, e: maxLon };
+        if (mode === 'centered') {
+          const cLat = (minLat + maxLat)/2, cLon = (minLon + maxLon)/2;
+          base.s = cLat - dy/2; base.n = cLat + dy/2; base.w = cLon - dx/2; base.e = cLon + dx/2;
+        }
+        const m = getManualInputs();
+        const manual = applyManualOffsets(base.w, base.s, base.e, base.n);
+        const diff = { w: manual.w - base.w, s: manual.s - base.s, e: manual.e - base.e, n: manual.n - base.n };
+        
+        // Validate east > west and north > south
+        const validationMsg = `Validation:\n` +
+          `  east(${manual.e.toFixed(6)}) > west(${manual.w.toFixed(6)}): ${manual.e > manual.w ? '✓' : '✗ FAIL'}\n` +
+          `  north(${manual.n.toFixed(6)}) > south(${manual.s.toFixed(6)}): ${manual.n > manual.s ? '✓' : '✗ FAIL'}\n` +
+          `  scale check - lon span: ${(manual.e - manual.w).toFixed(6)}, lat span: ${(manual.n - manual.s).toFixed(6)}`;
+        
+        disp.textContent = rawInfo + 
+                           `Filename mode: ${mode}\n` +
+                           `Base bbox (for filename):\n  south=${base.s.toFixed(6)} west=${base.w.toFixed(6)} north=${base.n.toFixed(6)} east=${base.e.toFixed(6)}\n` +
+                           `Manual bbox (for filename):\n  south=${manual.s.toFixed(6)} west=${manual.w.toFixed(6)} north=${manual.n.toFixed(6)} east=${manual.e.toFixed(6)}\n` +
+                           validationMsg;
+      }
+
+      // wire up manual inputs to update display
+      ['manualLat','manualLon','manualSouth','manualWest','manualNorth','manualEast','useManualOffset','useManualBBox','filenameMode','axisMode'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', updateManualDisplay);
+      });
+
+      // Build filename for exported overlay. Edit this function to change filename format.
+      function buildOverlayFilename(epoch) {
+        const fmt = v => v.toFixed(6).replace(/\./g,'_');
+        if (!bbox) return null;
+        const modeEl = document.getElementById('filenameMode');
+        const mode = modeEl ? modeEl.value : 'minmax';
+        const axisEl = document.getElementById('axisMode');
+        const axis = axisEl ? axisEl.value : 'both';
+
+        const minLat = bbox.minLat, maxLat = bbox.maxLat, minLon = bbox.minLon, maxLon = bbox.maxLon;
+        const dy = maxLat - minLat;
+        const dx = maxLon - minLon;
+
+        // mapping to hex nibble values for vertical/horizontal shift markers
+        const VHEX = {
+          none: '0', up_half: '1', up_full: '2', down_half: '3', down_full: '4'
+        };
+        const HHEX = {
+          none: '0', right_half: '1', right_full: '2', left_half: '3', left_full: '4'
+        };
+
+        function makeName(vHex, hHex, w, s, e, n) {
+          let base = `_m${vHex}_${hHex}_overlay_t${epoch}` + `_w${fmt(w)}_s${fmt(s)}_e${fmt(e)}_n${fmt(n)}`;
+          if (exportTimestamp) base += `_time${formatTimeForFilename(exportTimestamp)}`;
+          base += '.png';
+          return base;
+        }
+
+        /*//note: this is bad code made by ai the offsets are to relay the edges of a map cell we want to use tnesw file name format the error has bee how some math works with negative gps cords.
+        //note: the axis's may be invetted in the max min and width projections but thats ok as the image looks good.
+        //note: the image looks good but it seems that decoder sees the image fliped twice so i cant notice the transforms at play. 
+        //note: the image is of good scale but the name needs to denote the values of where you can find the farest south item as _s
+        //note: keep bad ai code for example of how not to write code. */
+
+        if (mode === 'minmax') {
+          // west = minLon, north = maxLat (actual edges)
+          // east = midpoint of lon, south = midpoint of lat (center point)
+          const base = {
+            w: minLon,
+            s: (minLat + maxLat) / 2,
+            e: (minLon + maxLon) / 2,
+            n: maxLat
+          };
+          const adj = applyManualOffsets(base.w, base.s, base.e, base.n);
+          return makeName(VHEX.none, HHEX.none, adj.w, adj.s, adj.e, adj.n);
+        }
+
+        if (mode === 'centered') {
+          const centerLatVal = (minLat + maxLat)/2;
+          const centerLonVal = (minLon + maxLon)/2;
+          const halfLatVal = dy/2;
+          const halfLonVal = dx/2;
+          const sVal = centerLatVal - halfLatVal;
+          const nVal = centerLatVal + halfLatVal;
+          const wVal = centerLonVal - halfLonVal;
+          const eVal = centerLonVal + halfLonVal;
+          // west = actual west edge, north = actual north edge
+          // east = midpoint of lon, south = midpoint of lat
+          const base = {
+            w: wVal,
+            s: (sVal + nVal) / 2,
+            e: (wVal + eVal) / 2,
+            n: nVal
+          };
+          const adj = applyManualOffsets(base.w, base.s, base.e, base.n);
+          return makeName(VHEX.none, HHEX.none, adj.w, adj.s, adj.e, adj.n);
+        }
+
+        if (mode === 'shift_half' || mode === 'shift_full') {
+          const shiftLat = (mode === 'shift_half') ? dy/2 : dy;
+          const shiftLon = (mode === 'shift_half') ? dx/2 : dx;
+          const variants = [];
+          [-1, 1].forEach(sign => {
+            // compute shifted bbox
+            let sVal = minLat + sign * shiftLat;
+            let nVal = maxLat + sign * shiftLat;
+            let wVal = minLon + sign * shiftLon;
+            let eVal = maxLon + sign * shiftLon;
+            // determine hex markers depending on sign and magnitude
+            let vMarker = VHEX.none;
+            let hMarker = HHEX.none;
+            if (axis === 'both' || axis === 'north-south') {
+              if (sign === 1) vMarker = (mode === 'shift_half') ? VHEX.up_half : VHEX.up_full;
+              else vMarker = (mode === 'shift_half') ? VHEX.down_half : VHEX.down_full;
+            }
+            if (axis === 'both' || axis === 'west-east') {
+              if (sign === 1) hMarker = (mode === 'shift_half') ? HHEX.right_half : HHEX.right_full;
+              else hMarker = (mode === 'shift_half') ? HHEX.left_half : HHEX.left_full;
+            }
+            if (axis === 'north-south') { wVal = minLon; eVal = maxLon; }
+            else if (axis === 'west-east') { sVal = minLat; nVal = maxLat; }
+            // west = actual west edge, north = actual north edge
+            // east = midpoint of lon, south = midpoint of lat
+            const base = {
+              w: wVal,
+              s: (sVal + nVal) / 2,
+              e: (wVal + eVal) / 2,
+              n: nVal
+            };
+            const adj = applyManualOffsets(base.w, base.s, base.e, base.n);
+            variants.push(makeName(vMarker, hMarker, adj.w, adj.s, adj.e, adj.n));
+          });
+          return variants;
+        }
+
+        // fallback
+        return makeName(minLon, minLat, maxLon, maxLat);
+      }
+
+      // Create blob and trigger download using the helper
+      bigC.toBlob(blob => {
+        const epoch = Math.floor(Date.now()/1000);
+        setExportTimestamp();
+        const names = buildOverlayFilename(epoch);
+        if (!names || (Array.isArray(names) && names.length === 0)) return alert('BBox missing - cannot build filename');
+        const url = URL.createObjectURL(blob);
+        // support single-string return or array of names
+        const out = Array.isArray(names) ? names : [names];
+        out.forEach(n => {
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = n;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        });
+        URL.revokeObjectURL(url);
       });
     });
   </script>
